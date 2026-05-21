@@ -1,0 +1,92 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.python-version
+AGENTS.md
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.venv/
+venv/
+env/
+build/
+dist/
+*.egg-info/
+
+# Local machine-specific configs and generated zones.
+configs/*.yaml
+!configs/inspection.sample.yaml
+configs/*.json
+!configs/zones.sample.json
+run_app.ps1
+run_app_hidden.vbs
+*.lnk
+
+# Generated inspection and validation outputs.
+outputs/*
+!outputs/.gitkeep
+
+# Local images and datasets. Keep only explicit placeholders tracked.
+data/*
+!data/.gitkeep
+data/jobs/
+!data/reference/
+data/reference/*
+!data/reference/.gitkeep
+!data/samples/
+data/samples/*
+!data/samples/.gitkeep
+datasets/
+dataset/
+local_data/
+
+# Local model/export artifacts can be very large.
+models/
+model_artifacts/
+checkpoints/
+exports/
+weights/
+lightning_logs/
+wandb/
+
+# Generated reports and visual audit artifacts.
+reports/
+validation_reports/
+visual_audit/
+*_heatmap.png
+*_heatmap_absolute.png
+*_overlay.png
+*_overlay_absolute.png
+*_presence_mask.png
+*_debug_mask.png
+contact_sheet.png
+predictions.csv
+threshold_sweep.csv
+false_positives.csv
+false_negatives.csv
+summary.csv
+
+# Temporary/debug files.
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+
+# Model/export files.
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.engine
+*.plan
+
+# OS/editor noise.
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/

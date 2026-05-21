@@ -1,0 +1,27 @@
+# Copy this file to a local .yaml config and edit paths for your machine.
+project:
+  name: "default_job"
+
+model:
+  path: "path/to/anomaly_model.pt"
+  format: "auto"
+  anomaly_threshold: 0.5
+  device: "auto"
+
+presence:
+  reference_image_path: "data/reference/empty_reference.png"
+  zones_path: "configs/zones.json"
+  pixel_diff_threshold: 30
+  min_foreground_ratio: 0.08
+  min_blob_area: 500
+  blur_kernel_size: 5
+  morphology_kernel_size: 5
+  use_largest_blob_filter: true
+
+output:
+  save_annotated: true
+  save_heatmap: true
+  save_presence_mask: true
+  organize_by_result: true
+  show_images: true
+  save_csv_log: true

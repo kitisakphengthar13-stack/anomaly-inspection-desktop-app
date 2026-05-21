@@ -1,0 +1,11 @@
+numpy>=1.23
+opencv-python>=4.8
+PySide6>=6.11
+PyYAML>=6.0
+QtAwesome>=1.4
+pytest>=7.0
+
+# Optional for real Anomalib anomaly-model inference.
+anomalib
+torch
+lightning

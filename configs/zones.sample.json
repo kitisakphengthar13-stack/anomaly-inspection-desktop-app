@@ -1,0 +1,11 @@
+{
+  "image_width": 640,
+  "image_height": 480,
+  "zones": [
+    {
+      "id": "zone_1",
+      "type": "polygon",
+      "points": [[160, 120], [480, 120], [480, 360], [160, 360]]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anomaly-inspection-desktop-app"
+version = "0.1.0"
+description = "PySide6 desktop app for presence-gated anomaly inspection with Anomalib model support"
+requires-python = ">=3.9"
+dependencies = [
+  "numpy>=1.23",
+  "opencv-python>=4.8",
+  "PySide6>=6.11",
+  "PyYAML>=6.0",
+  "QtAwesome>=1.4",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+anomalib = ["anomalib", "torch", "lightning"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
