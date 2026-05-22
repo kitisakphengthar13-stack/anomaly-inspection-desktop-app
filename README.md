@@ -77,24 +77,52 @@ This deterministic gate is useful for fixed-camera, stable-background stations w
 
 ## Setup
 
-```bash
-pip install -r requirements.txt
-pytest
-```
-
-The root launcher script works from the repository root after installing requirements. It does not require editable installation or manual `PYTHONPATH` setup.
-
-Editable install remains optional for development:
+Install the package in editable mode for local development:
 
 ```bash
-pip install -e .
+python -m pip install -e .
 ```
+
+The base install includes the core inspection pipeline dependencies. Add extras for the desktop UI, anomaly-model runtime, and tests as needed:
+
+```bash
+python -m pip install -e ".[gui]"
+python -m pip install -e ".[gui,anomaly,test]"
+```
+
+Run tests with:
+
+```bash
+python -m pytest
+```
+
+After editable install, command-line entry points are available:
+
+```bash
+inspection-app
+inspection-cli --help
+```
+
+The root launcher scripts also remain supported from the repository root:
+
+```bash
+python inspection_app.py
+python inspection_cli.py
+```
+
+Packaging note: the current editable workflow still resolves GUI assets and public config templates from the repository layout. A future wheel-packaging pass should move those runtime resources under the Python package and load them with package-resource APIs.
 
 ## Desktop App
 
 The PySide6 desktop frontend is the primary app experience, with the existing CLI workflow still available for setup, automation, and debugging. The current desktop app opens a main window with compact top navigation, current page title/subtitle in the left side of the shell, product branding on the right, no global bottom status bar, shared app state, a functional Project Setup page for YAML config management, a functional Capture Reference page for webcam reference-image capture, a functional Draw Zones page for polygon zone setup, functional Inspect Image and Inspect Camera pages, and a functional Logs page for CSV history review.
 
-Launch it from the repository root:
+Launch it after installing the `gui` extra:
+
+```bash
+inspection-app
+```
+
+Or launch it from the repository root:
 
 ```bash
 python inspection_app.py

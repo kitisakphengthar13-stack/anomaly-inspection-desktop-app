@@ -3,11 +3,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+_REPO_ROOT = Path(__file__).resolve().parent
+_SRC_PATH = _REPO_ROOT / "src"
+
+if __name__ != "__main__":
+    __path__ = [str(_SRC_PATH / "inspection_app")]
+
 
 def main() -> int:
-    repo_root = Path(__file__).resolve().parent
-    src_path = repo_root / "src"
-    sys.path.insert(0, str(src_path))
+    sys.path.insert(0, str(_SRC_PATH))
 
     from inspection_app.app import main as app_main
 

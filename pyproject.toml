@@ -10,14 +10,37 @@ requires-python = ">=3.9"
 dependencies = [
   "numpy>=1.23",
   "opencv-python>=4.8",
-  "PySide6>=6.11",
   "PyYAML>=6.0",
-  "QtAwesome>=1.4",
 ]
 
+[project.scripts]
+inspection-app = "inspection_app.app:main"
+inspection-cli = "inspection.main:main"
+
 [project.optional-dependencies]
-test = ["pytest>=7.0"]
-anomalib = ["anomalib", "torch", "lightning"]
+gui = [
+  "PySide6>=6.11",
+  "QtAwesome>=1.4",
+]
+anomaly = [
+  "anomalib",
+  "torch",
+  "lightning",
+]
+test = [
+  "pytest>=7.0",
+]
+dev = [
+  "pytest>=7.0",
+]
+all = [
+  "PySide6>=6.11",
+  "QtAwesome>=1.4",
+  "anomalib",
+  "torch",
+  "lightning",
+  "pytest>=7.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
