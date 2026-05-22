@@ -17,7 +17,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     app = QApplication(list(argv) if argv is not None else sys.argv)
     configure_app_locale(app)
     apply_app_theme(app)
-    app.setApplicationName("Anomaly Inspection Pipeline")
+    app.setApplicationName("Anomaly Inspection")
     apply_application_icon(app)
 
     state = AppState(status_message="Desktop app shell initialized.")
