@@ -24,6 +24,7 @@ gui = [
 ]
 anomaly = [
   "anomalib",
+  "openvino",
   "torch",
   "lightning",
 ]
@@ -37,6 +38,7 @@ all = [
   "PySide6>=6.11",
   "QtAwesome>=1.4",
   "anomalib",
+  "openvino",
   "torch",
   "lightning",
   "pytest>=7.0",

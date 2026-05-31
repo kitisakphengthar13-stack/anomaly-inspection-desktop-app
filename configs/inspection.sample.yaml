@@ -3,14 +3,14 @@ project:
   name: "default_job"
 
 model:
-  path: "path/to/anomaly_model.pt"
-  format: "auto"
+  path: "path/to/anomaly_model.xml"
+  format: "auto"  # auto, ckpt, torch_export, openvino
   anomaly_threshold: 0.5
   device: "auto"
 
 presence:
-  reference_image_path: "data/reference/empty_reference.png"
-  zones_path: "configs/zones.json"
+  reference_image_path: "path/to/reference_image.png"
+  zones_path: "path/to/zones.json"
   pixel_diff_threshold: 30
   min_foreground_ratio: 0.08
   min_blob_area: 500

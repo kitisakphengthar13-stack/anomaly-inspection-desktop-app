@@ -48,6 +48,8 @@ from inspection_app.theme import page_margins, theme_spacing, zero_margins
 from inspection_app.ui_components import ActionButtonRow, MetricGrid, PathPickerRow, SectionPanel, StatusBanner, set_button_icon, set_button_role
 
 StatusCallback = Callable[[str], None]
+SAMPLE_REFERENCE_IMAGE_PATH = Path("path/to/reference_image.png")
+SAMPLE_ZONES_PATH = Path("path/to/zones.json")
 
 
 class RuntimePrepareWorker(QObject):
@@ -246,7 +248,7 @@ class ProjectSetupPage(QWidget):
         form.addRow("Model path", model_path_row)
 
         self.model_format_combo = QComboBox()
-        self.model_format_combo.addItems(["auto", "ckpt", "torch_export"])
+        self.model_format_combo.addItems(["auto", "ckpt", "torch_export", "openvino"])
         form.addRow("Model artifact type", self.model_format_combo)
 
         self.anomaly_threshold_spin = QDoubleSpinBox()
@@ -495,7 +497,7 @@ class ProjectSetupPage(QWidget):
             self._set_feedback(f"Failed to save config: {exc}", ok=False)
 
     def _browse_model(self) -> None:
-        self._browse_file(self.model_path_edit, "Choose anomaly model", "Model files (*.ckpt *.pt);;All files (*)")
+        self._browse_file(self.model_path_edit, "Choose anomaly model", "Model files (*.ckpt *.pt *.xml);;All files (*)")
 
     def _browse_reference(self) -> None:
         self._browse_file(self.reference_path_edit, "Choose reference image", "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;All files (*)")
@@ -723,4 +725,5 @@ def _presence_path_value(value: object) -> str | None:
 
 
 def _should_replace_with_job_default(path: str | Path | None, legacy_path: Path) -> bool:
-    return path is None or Path(path) == legacy_path
+    sample_path = SAMPLE_REFERENCE_IMAGE_PATH if legacy_path == LEGACY_REFERENCE_IMAGE_PATH else SAMPLE_ZONES_PATH
+    return path is None or Path(path) in {legacy_path, sample_path}

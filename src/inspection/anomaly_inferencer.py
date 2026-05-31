@@ -99,6 +99,71 @@ class LightningCheckpointBackend(BaseAnomalyBackend):
                 return self.model({"image": tensor})
 
 
+class OpenVINOBackend(BaseAnomalyBackend):
+    """Backend for Anomalib OpenVINO `.xml` exports."""
+
+    backend_name = "openvino"
+    input_size = (256, 256)
+
+    def __init__(self, model_path: str | Path, device: str = "auto"):
+        self.model_path = Path(model_path)
+        self.device = resolve_openvino_device(device)
+        self.core: Any = None
+        self.compiled_model: Any = None
+        self.input_name: Optional[str] = None
+        self.output_names = ("pred_score", "pred_label", "anomaly_map", "pred_mask")
+
+    def load(self) -> None:
+        if self.model_path.suffix.lower() == ".xml":
+            weights_path = self.model_path.with_suffix(".bin")
+            if not weights_path.exists():
+                raise FileNotFoundError(f"OpenVINO weights file does not exist: {weights_path}")
+
+        try:
+            from openvino import Core
+        except Exception:
+            from openvino.runtime import Core
+
+        self.core = Core()
+        model = self.core.read_model(str(self.model_path))
+        self.compiled_model = self.core.compile_model(model, self.device)
+        inputs = list(self.compiled_model.inputs)
+        if not inputs:
+            raise ValueError(f"OpenVINO model has no inputs: {self.model_path}")
+        self.input_name = input_any_name(inputs[0])
+
+    def predict(self, image_bgr: np.ndarray) -> dict[str, Any]:
+        if self.compiled_model is None or self.input_name is None:
+            raise RuntimeError("OpenVINO backend is not loaded.")
+        input_tensor = self.preprocess(image_bgr)
+        raw_outputs = self.compiled_model({self.input_name: input_tensor})
+        return {name: self._output_value(raw_outputs, name) for name in self.output_names}
+
+    @classmethod
+    def preprocess(cls, image_bgr: np.ndarray) -> np.ndarray:
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        image_rgb = cv2.resize(image_rgb, cls.input_size, interpolation=cv2.INTER_AREA)
+        tensor = image_rgb.astype(np.float32) / 255.0
+        tensor = np.transpose(tensor, (2, 0, 1))
+        return np.expand_dims(tensor, axis=0)
+
+    def _output_value(self, raw_outputs: Any, output_name: str) -> Any:
+        if isinstance(raw_outputs, dict):
+            if output_name in raw_outputs:
+                return raw_outputs[output_name]
+            for key, value in raw_outputs.items():
+                if input_any_name(key) == output_name:
+                    return value
+        if self.compiled_model is not None:
+            for output in self.compiled_model.outputs:
+                if input_any_name(output) == output_name:
+                    try:
+                        return raw_outputs[output]
+                    except Exception:
+                        return None
+        return None
+
+
 class AnomalyInferencer:
     """Model-agnostic Anomalib inference facade used by the pipeline."""
 
@@ -111,6 +176,7 @@ class AnomalyInferencer:
     ):
         self.model_path = Path(model_path)
         self.anomaly_threshold = float(anomaly_threshold)
+        self.requested_device = device
         self.device = resolve_device(device)
         self.model_format = model_format
         self.backend: Optional[BaseAnomalyBackend] = None
@@ -133,6 +199,8 @@ class AnomalyInferencer:
             return ExportedTorchBackend(self.model_path, self.device)
         if model_format == "ckpt":
             return LightningCheckpointBackend(self.model_path, self.device)
+        if model_format == "openvino":
+            return OpenVINOBackend(self.model_path, self.requested_device)
         raise ValueError(f"Unsupported model format '{model_format}'.")
 
     def predict_image_path(self, image_path: str | Path, heatmap_path: Optional[str | Path] = None) -> AnomalyResult:
@@ -190,12 +258,28 @@ def resolve_device(device: str) -> str:
         return "cpu"
 
 
+def resolve_openvino_device(device: str) -> str:
+    normalized = device.strip().lower()
+    if normalized in {"", "auto", "cpu"}:
+        return "CPU"
+    if normalized == "cuda":
+        return "GPU"
+    return device.strip().upper()
+
+
 def detect_model_format(model_path: str | Path, requested_format: str = "auto") -> str:
     requested_format = requested_format.lower()
-    aliases = {"pt": "torch_export", "torch": "torch_export", "torch_export": "torch_export", "ckpt": "ckpt"}
+    aliases = {
+        "pt": "torch_export",
+        "torch": "torch_export",
+        "torch_export": "torch_export",
+        "ckpt": "ckpt",
+        "openvino": "openvino",
+        "xml": "openvino",
+    }
     if requested_format != "auto":
         if requested_format not in aliases:
-            raise ValueError("model.format must be one of: auto, ckpt, torch_export.")
+            raise ValueError("model.format must be one of: auto, ckpt, torch_export, openvino.")
         return aliases[requested_format]
 
     suffix = Path(model_path).suffix.lower()
@@ -203,7 +287,35 @@ def detect_model_format(model_path: str | Path, requested_format: str = "auto") 
         return "ckpt"
     if suffix == ".pt":
         return "torch_export"
+    if suffix == ".xml":
+        return "openvino"
     raise ValueError(f"Could not auto-detect model format from extension '{suffix}'.")
+
+
+def input_any_name(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    for attr_name in ("get_any_name", "get_node"):
+        attr = getattr(value, attr_name, None)
+        if attr is None:
+            continue
+        try:
+            candidate = attr()
+        except Exception:
+            continue
+        if isinstance(candidate, str):
+            return candidate
+        if candidate is not value:
+            nested = input_any_name(candidate)
+            if nested:
+                return nested
+    names = getattr(value, "names", None)
+    if names:
+        try:
+            return next(iter(names))
+        except Exception:
+            pass
+    return str(value)
 
 
 def extract_score(prediction: Any) -> Optional[float]:

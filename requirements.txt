@@ -7,5 +7,6 @@ pytest>=7.0
 
 # Optional for real Anomalib anomaly-model inference.
 anomalib
+openvino
 torch
 lightning

@@ -129,14 +129,14 @@ def load_config(config_path: str | Path) -> InspectionConfig:
     if not model_path_value:
         raise ValueError("model.path is required. Legacy model.checkpoint_path is also accepted.")
     model_format = str(model_data.get("format", "auto")).lower()
-    if model_format not in {"auto", "ckpt", "torch_export", "pt", "torch"}:
-        raise ValueError("model.format must be one of: auto, ckpt, torch_export.")
+    if model_format not in {"auto", "ckpt", "torch_export", "pt", "torch", "openvino", "xml"}:
+        raise ValueError("model.format must be one of: auto, ckpt, torch_export, openvino.")
 
     model = ModelConfig(
         path=_resolve_path(str(model_path_value), base_dir),
         anomaly_threshold=threshold,
         device=str(model_data.get("device", "auto")),
-        format="torch_export" if model_format in {"pt", "torch"} else model_format,
+        format="torch_export" if model_format in {"pt", "torch"} else "openvino" if model_format == "xml" else model_format,
     )
     presence = PresenceConfig(
         reference_image_path=_resolve_path(str(presence_data["reference_image_path"]), base_dir),

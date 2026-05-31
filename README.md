@@ -45,13 +45,17 @@ The anomaly inference layer supports:
 
 - Anomalib-compatible Lightning `.ckpt` checkpoints.
 - Anomalib-compatible exported Torch `.pt` artifacts.
+- Anomalib-compatible exported OpenVINO `.xml` artifacts with adjacent `.bin` weights.
 
 Verified examples:
 
 - PatchCore Lightning `.ckpt`
 - Reverse Distillation / RD exported Torch `.pt`
+- PatchCore OpenVINO `.xml/.bin`
 
 The `.pt` support uses a general exported-Torch backend through Anomalib `TorchInferencer`; it is not RD-specific. A compatible PatchCore exported `.pt` should use the same backend path, subject to the actual artifact being produced by a supported Anomalib export workflow.
+
+The OpenVINO backend uses direct OpenVINO Runtime inference. It keeps presence checking and saved visualizations at the original source-image resolution, then resizes internally to the OpenVINO model input size before inference.
 
 ## Decision Rule
 
@@ -243,7 +247,7 @@ project:
 
 model:
   path: "path/to/model.ckpt"
-  format: "auto"        # auto, ckpt, torch_export
+  format: "auto"        # auto, ckpt, torch_export, openvino
   anomaly_threshold: 0.5
   device: "auto"
 ```
@@ -427,6 +431,7 @@ outputs/transistor/folder/
 - The presence gate can fail with lighting shifts, camera motion, shadows, background changes, or low part/background contrast.
 - `.ckpt` loading is currently verified with PatchCore Lightning checkpoints.
 - `.pt` loading requires a compatible Anomalib exported Torch artifact.
+- OpenVINO loading requires a compatible exported `.xml` file and adjacent `.bin` weights file.
 - Some Anomalib exported Torch artifacts use pickle-based loading internally; only load trusted local artifacts.
 - Threshold retuning should be based on representative OK/NG validation images.
 

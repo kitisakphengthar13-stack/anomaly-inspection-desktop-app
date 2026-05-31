@@ -26,6 +26,16 @@ def test_config_accepts_new_model_path_key(tmp_path):
     assert config.model.format == "auto"
 
 
+def test_config_accepts_openvino_model_format(tmp_path):
+    path = base_config(tmp_path, {"path": "model.xml", "format": "openvino", "anomaly_threshold": 0.5, "device": "cpu"})
+
+    config = load_config(path)
+
+    assert config.model.path == tmp_path / "model.xml"
+    assert config.model.format == "openvino"
+    assert config.model.device == "cpu"
+
+
 def test_config_accepts_legacy_checkpoint_path_key(tmp_path):
     path = base_config(tmp_path, {"checkpoint_path": "model.ckpt", "anomaly_threshold": 1.0})
 

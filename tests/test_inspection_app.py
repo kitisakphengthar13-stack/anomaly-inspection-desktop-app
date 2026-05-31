@@ -918,6 +918,8 @@ def test_project_setup_loaded_legacy_paths_remain_explicit():
     state = AppState()
     page = ProjectSetupPage(state)
     data = default_config_data()
+    data["presence"]["reference_image_path"] = "data/reference/empty_reference.png"
+    data["presence"]["zones_path"] = "configs/zones.json"
 
     page.populate_from_data(data, explicit_config=True)
     page.job_name_edit.setText("Transistor")
