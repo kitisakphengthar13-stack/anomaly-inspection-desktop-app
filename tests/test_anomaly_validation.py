@@ -67,6 +67,7 @@ def test_run_anomaly_validation_passes_explicit_anomalib_model(tmp_path, monkeyp
             device="cpu",
             format="ckpt",
             anomalib_model="reverse_distillation",
+            checkpoint_inference_mode="engine",
         ),
         presence=PresenceConfig(reference_image_path=tmp_path / "ref.png", zones_path=tmp_path / "zones.json"),
         output=OutputConfig(),
@@ -84,3 +85,4 @@ def test_run_anomaly_validation_passes_explicit_anomalib_model(tmp_path, monkeyp
     assert captured["model_path"] == tmp_path / "model.ckpt"
     assert captured["model_format"] == "ckpt"
     assert captured["anomalib_model"] == "reverse_distillation"
+    assert captured["checkpoint_inference_mode"] == "engine"

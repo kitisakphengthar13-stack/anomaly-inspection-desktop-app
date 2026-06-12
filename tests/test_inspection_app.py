@@ -3,6 +3,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 import yaml
 import inspection_app.runtime as runtime_module
 from PySide6.QtCore import Qt
@@ -24,7 +25,7 @@ from PySide6.QtWidgets import (
 
 from inspection.config import load_config
 from inspection.zone_io import load_zones
-from inspection_app.config_io import default_config_data, save_config_data, validate_config_data
+from inspection_app.config_io import config_to_yaml_data, default_config_data, save_config_data, validate_config_data
 from inspection_app.formatting import (
     format_anomaly_decision,
     format_duration_ms,
@@ -638,6 +639,7 @@ def test_config_io_saves_backend_compatible_yaml(tmp_path):
     assert loaded.project.name == "Metal Surface"
     assert loaded.model.path == tmp_path / "model.pt"
     assert loaded.model.anomalib_model == "reverse_distillation"
+    assert loaded.model.checkpoint_inference_mode == "engine"
     assert loaded.presence.pixel_diff_threshold == 30
     assert loaded.output.show_images is True
 
@@ -645,6 +647,41 @@ def test_config_io_saves_backend_compatible_yaml(tmp_path):
     assert list(raw) == ["project", "model", "presence", "output"]
     assert raw["project"]["name"] == "Metal Surface"
     assert raw["model"]["anomalib_model"] == "reverse_distillation"
+    assert "checkpoint_inference_mode" not in raw["model"]
+
+
+def test_config_io_serialization_omits_checkpoint_inference_mode(tmp_path):
+    data = default_config_data()
+    data["model"]["path"] = "model.ckpt"
+    data["model"]["format"] = "ckpt"
+    data["presence"]["reference_image_path"] = "data/reference/empty_reference.png"
+    data["presence"]["zones_path"] = "configs/zones.json"
+    path = tmp_path / "inspection.yaml"
+
+    save_config_data(path, data)
+    loaded = load_config(path)
+    raw = config_to_yaml_data(loaded)
+
+    assert loaded.model.checkpoint_inference_mode == "engine"
+    assert "checkpoint_inference_mode" not in raw["model"]
+
+
+def test_config_io_drops_deprecated_direct_checkpoint_inference_mode(tmp_path):
+    data = default_config_data()
+    data["model"]["path"] = "model.ckpt"
+    data["model"]["format"] = "ckpt"
+    data["model"]["checkpoint_inference_mode"] = "direct"
+    data["presence"]["reference_image_path"] = "data/reference/empty_reference.png"
+    data["presence"]["zones_path"] = "configs/zones.json"
+    path = tmp_path / "inspection.yaml"
+
+    save_config_data(path, data)
+    with pytest.warns(DeprecationWarning, match="checkpoint_inference_mode is deprecated"):
+        loaded = load_config(path)
+    raw = config_to_yaml_data(loaded)
+
+    assert loaded.model.checkpoint_inference_mode == "direct"
+    assert "checkpoint_inference_mode" not in raw["model"]
 
 
 def test_config_io_validation_uses_backend_rules():
@@ -863,6 +900,17 @@ def test_project_setup_preserves_anomalib_model_field():
 
     assert page.anomalib_model_edit.text() == "reverse_distillation"
     assert page.to_config_data()["model"]["anomalib_model"] == "reverse_distillation"
+
+
+def test_project_setup_drops_checkpoint_inference_mode_without_ui_field():
+    app = QApplication.instance() or QApplication([])
+    page = ProjectSetupPage(AppState())
+    data = default_config_data()
+    data["model"]["checkpoint_inference_mode"] = "direct"
+
+    page.populate_from_data(data)
+
+    assert "checkpoint_inference_mode" not in page.to_config_data()["model"]
 
 
 def test_project_setup_prepare_runtime_is_primary_only_when_action_is_needed():

@@ -66,6 +66,7 @@ class InspectionPipeline:
                 device=self.config.model.device,
                 model_format=self.config.model.format,
                 anomalib_model=self.config.model.anomalib_model,
+                checkpoint_inference_mode=self.config.model.checkpoint_inference_mode,
             )
         return self.anomaly_inferencer
 

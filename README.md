@@ -247,7 +247,8 @@ project:
 
 model:
   path: "path/to/model.ckpt"
-  format: "auto"        # auto, ckpt, torch_export, openvino
+  format: "ckpt"        # auto, ckpt, torch_export, openvino
+  anomalib_model: "reverse_distillation"
   anomaly_threshold: 0.5
   device: "auto"
 ```
@@ -257,6 +258,8 @@ In the desktop app, `project.name` is shown as `Inspection Job`. It is used to d
 The desktop setup workflow also proposes job-centered local setup assets by default: `data/jobs/<job_slug>/reference/empty_reference.png` for the empty reference image and `data/jobs/<job_slug>/zones/zones.json` for the presence zones. These are desktop conveniences only; the saved YAML config still stores explicit `presence.reference_image_path` and `presence.zones_path` values, and existing configs that use paths such as `data/reference/empty_reference.png` or `configs/zones.json` remain valid.
 
 Legacy `model.checkpoint_path` is still accepted as an alias for `model.path`.
+
+Runtime policy is artifact-specific. Lightning checkpoint artifacts (`.ckpt`) use Anomalib `Engine.predict()`. Exported Torch artifacts (`.pt`) use the exported Torch inference path, and OpenVINO artifacts (`.xml`) use the OpenVINO backend. For deployment, exported `.pt` or OpenVINO `.xml` artifacts remain preferred because `.ckpt` inference is heavier and more dependent on the Anomalib/Lightning runtime. Re-check `anomaly_threshold` when changing artifact type or inference path because score scales can differ.
 
 `pred_label` is the primary OK/NG decision source when the model provides it. `anomaly_threshold` is only a fallback comparison threshold when `pred_label` is unavailable. The configured threshold must match the score scale used by that fallback path; for the current normalized runtime score fallback, `0.5` is the correct example value.
 

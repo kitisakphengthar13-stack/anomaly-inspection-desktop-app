@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
+import warnings
 
 import yaml
 
@@ -26,6 +27,7 @@ class ModelConfig:
     device: str = "auto"
     format: str = "auto"
     anomalib_model: str | None = None
+    checkpoint_inference_mode: str = "engine"
 
     @property
     def checkpoint_path(self) -> Path:
@@ -132,6 +134,16 @@ def load_config(config_path: str | Path) -> InspectionConfig:
     model_format = str(model_data.get("format", "auto")).lower()
     if model_format not in {"auto", "ckpt", "torch_export", "pt", "torch", "openvino", "xml"}:
         raise ValueError("model.format must be one of: auto, ckpt, torch_export, openvino.")
+    checkpoint_inference_mode = str(model_data.get("checkpoint_inference_mode", "engine") or "engine").strip().lower()
+    if checkpoint_inference_mode not in {"direct", "engine"}:
+        raise ValueError("model.checkpoint_inference_mode must be one of: direct, engine.")
+    if checkpoint_inference_mode == "direct":
+        warnings.warn(
+            "model.checkpoint_inference_mode is deprecated and hidden from the public config contract. "
+            "Lightning checkpoints use Anomalib Engine inference by default; direct mode is for internal debugging only.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     anomalib_model_value = str(model_data["anomalib_model"]).strip() if model_data.get("anomalib_model") is not None else None
     model = ModelConfig(
@@ -140,6 +152,7 @@ def load_config(config_path: str | Path) -> InspectionConfig:
         device=str(model_data.get("device", "auto")),
         format="torch_export" if model_format in {"pt", "torch"} else "openvino" if model_format == "xml" else model_format,
         anomalib_model=anomalib_model_value or None,
+        checkpoint_inference_mode=checkpoint_inference_mode,
     )
     presence = PresenceConfig(
         reference_image_path=_resolve_path(str(presence_data["reference_image_path"]), base_dir),

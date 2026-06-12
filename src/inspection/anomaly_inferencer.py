@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tempfile
 from typing import Any, Optional
+import warnings
 
 import cv2
 import numpy as np
@@ -106,6 +108,72 @@ class LightningCheckpointBackend(BaseAnomalyBackend):
                 return self.model({"image": tensor})
 
 
+class EngineCheckpointBackend(BaseAnomalyBackend):
+    """Experimental Anomalib Engine-based backend for Lightning `.ckpt` checkpoints."""
+
+    backend_name = "engine_checkpoint"
+
+    def __init__(
+        self,
+        model_path: str | Path,
+        device: str = "auto",
+        *,
+        model_class: Any,
+        model_name: str,
+        model_source: str,
+    ):
+        super().__init__(model_path, device)
+        self.model: Any = None
+        self.engine: Any = None
+        self._engine_output_dir: tempfile.TemporaryDirectory | None = None
+        self.model_class = model_class
+        self.model_name = model_name
+        self.model_source = model_source
+
+    def load(self) -> None:
+        from anomalib.engine import Engine
+
+        try:
+            self.model = self.model_class.load_from_checkpoint(str(self.model_path), weights_only=False)
+        except Exception as exc:
+            if self.model_source == "legacy_default":
+                raise RuntimeError(
+                    "Engine checkpoint loading failed after using the legacy PatchCore fallback. "
+                    "No model.anomalib_model was set, so the checkpoint was loaded as PatchCore. "
+                    "If this checkpoint is not PatchCore, set model.anomalib_model explicitly "
+                    "(for example, reverse_distillation). "
+                    f"Original error: {exc}"
+                ) from exc
+            raise
+        self.model.eval()
+        self.model.to(self.device)
+        self._engine_output_dir = tempfile.TemporaryDirectory(prefix="anomalib_engine_")
+        self.engine = Engine(
+            accelerator=engine_accelerator(self.device),
+            devices=1,
+            logger=False,
+            default_root_dir=self._engine_output_dir.name,
+            enable_progress_bar=False,
+        )
+
+    def predict(self, image_bgr: np.ndarray) -> Any:
+        if self.model is None or self.engine is None:
+            raise RuntimeError("Engine checkpoint backend is not loaded.")
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
+                temp_path = Path(temp_file.name)
+            if not cv2.imwrite(str(temp_path), image_bgr):
+                raise RuntimeError("Could not create temporary image for Anomalib Engine prediction.")
+            predictions = self.engine.predict(model=self.model, data_path=temp_path, return_predictions=True)
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+        if not predictions:
+            raise RuntimeError("Anomalib Engine did not return a prediction.")
+        return predictions[0]
+
+
 class OpenVINOBackend(BaseAnomalyBackend):
     """Backend for Anomalib OpenVINO `.xml` exports."""
 
@@ -181,6 +249,7 @@ class AnomalyInferencer:
         device: str = "auto",
         model_format: str = "auto",
         anomalib_model: str | None = None,
+        checkpoint_inference_mode: str = "engine",
     ):
         self.model_path = Path(model_path)
         self.anomaly_threshold = float(anomaly_threshold)
@@ -188,6 +257,7 @@ class AnomalyInferencer:
         self.device = resolve_device(device)
         self.model_format = model_format
         self.anomalib_model = anomalib_model
+        self.checkpoint_inference_mode = normalize_checkpoint_inference_mode(checkpoint_inference_mode)
         self.backend: Optional[BaseAnomalyBackend] = None
         self.backend_name: Optional[str] = None
         self._loaded = False
@@ -208,7 +278,19 @@ class AnomalyInferencer:
             return ExportedTorchBackend(self.model_path, self.device)
         if model_format == "ckpt":
             resolved = AnomalibModelResolver().resolve_for_checkpoint(self.model_path, self.anomalib_model)
-            return LightningCheckpointBackend(
+            if self.checkpoint_inference_mode == "direct":
+                warnings.warn(
+                    "model.checkpoint_inference_mode='direct' uses the legacy/debug Lightning checkpoint path. "
+                    "The official default for .ckpt artifacts is Anomalib Engine inference.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            backend_class = (
+                LightningCheckpointBackend
+                if self.checkpoint_inference_mode == "direct"
+                else EngineCheckpointBackend
+            )
+            return backend_class(
                 self.model_path,
                 self.device,
                 model_class=resolved.model_class,
@@ -256,10 +338,14 @@ class AnomalyInferencer:
                 heatmap=heatmap,
             )
         except Exception as exc:
+            if self.backend_name == EngineCheckpointBackend.backend_name:
+                message = f"Engine checkpoint inference failed: {exc}"
+            else:
+                message = f"Anomaly inference failed: {exc}"
             return AnomalyResult(
                 backend_name=self.backend_name,
                 model_path=str(self.model_path),
-                error_message=f"Anomaly inference failed: {exc}",
+                error_message=message,
             )
 
 
@@ -281,6 +367,21 @@ def resolve_openvino_device(device: str) -> str:
     if normalized == "cuda":
         return "GPU"
     return device.strip().upper()
+
+
+def engine_accelerator(device: str) -> str:
+    if device.lower().startswith("cuda"):
+        return "gpu"
+    if device.lower() == "cpu":
+        return "cpu"
+    return "auto"
+
+
+def normalize_checkpoint_inference_mode(mode: str) -> str:
+    normalized = str(mode or "engine").strip().lower()
+    if normalized not in {"direct", "engine"}:
+        raise ValueError("model.checkpoint_inference_mode must be one of: direct, engine.")
+    return normalized
 
 
 def detect_model_format(model_path: str | Path, requested_format: str = "auto") -> str:

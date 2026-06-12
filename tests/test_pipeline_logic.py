@@ -121,6 +121,7 @@ def test_pipeline_passes_anomalib_model_with_keyword_arguments(tmp_path, monkeyp
             device="cpu",
             format="ckpt",
             anomalib_model="reverse_distillation",
+            checkpoint_inference_mode="engine",
         ),
         presence=config.presence,
         output=config.output,
@@ -143,6 +144,7 @@ def test_pipeline_passes_anomalib_model_with_keyword_arguments(tmp_path, monkeyp
     assert captured["model_path"] == tmp_path / "model.ckpt"
     assert captured["model_format"] == "ckpt"
     assert captured["anomalib_model"] == "reverse_distillation"
+    assert captured["checkpoint_inference_mode"] == "engine"
 
 
 def test_part_present_low_score_returns_ok(tmp_path):

@@ -60,6 +60,7 @@ def run_anomaly_validation(
         device=config.model.device,
         model_format=config.model.format,
         anomalib_model=config.model.anomalib_model,
+        checkpoint_inference_mode=config.model.checkpoint_inference_mode,
     )
     inferencer.load()
 

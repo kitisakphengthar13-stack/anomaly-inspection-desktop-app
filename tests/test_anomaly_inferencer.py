@@ -1,7 +1,12 @@
+import sys
+from types import SimpleNamespace
+
 import numpy as np
+import pytest
 
 from inspection.anomaly_inferencer import (
     AnomalyInferencer,
+    EngineCheckpointBackend,
     ExportedTorchBackend,
     LightningCheckpointBackend,
     OpenVINOBackend,
@@ -17,6 +22,7 @@ class Prediction:
     def __init__(self):
         self.pred_score = np.array([[0.74]], dtype=np.float32)
         self.pred_label = np.array([True])
+        self.anomaly_map = np.ones((1, 1, 8, 8), dtype=np.float32)
 
 
 def test_backend_auto_detection():
@@ -28,7 +34,7 @@ def test_backend_auto_detection():
     assert detect_model_format("model.anything", "openvino") == "openvino"
 
 
-def test_anomaly_inferencer_ckpt_uses_resolved_anomalib_model(monkeypatch):
+def test_anomaly_inferencer_ckpt_defaults_to_engine_backend(monkeypatch):
     class FakeModel:
         pass
 
@@ -54,26 +60,185 @@ def test_anomaly_inferencer_ckpt_uses_resolved_anomalib_model(monkeypatch):
 
     backend = inferencer._build_backend()
 
+    assert isinstance(backend, EngineCheckpointBackend)
+    assert backend.model_class is FakeModel
+    assert backend.model_name == "reverse_distillation"
+    assert backend.model_source == "explicit"
+
+
+def test_anomaly_inferencer_ckpt_explicit_direct_uses_legacy_backend(monkeypatch):
+    class FakeModel:
+        pass
+
+    class FakeResolved:
+        name = "reverse_distillation"
+        model_class = FakeModel
+        source = "explicit"
+
+    class FakeResolver:
+        def resolve_for_checkpoint(self, model_path, anomalib_model):
+            assert str(model_path) == "model.ckpt"
+            assert anomalib_model == "reverse_distillation"
+            return FakeResolved()
+
+    monkeypatch.setattr("inspection.anomaly_inferencer.AnomalibModelResolver", lambda: FakeResolver())
+    inferencer = AnomalyInferencer(
+        model_path="model.ckpt",
+        anomaly_threshold=0.5,
+        device="cpu",
+        model_format="ckpt",
+        anomalib_model="reverse_distillation",
+        checkpoint_inference_mode="direct",
+    )
+
+    with pytest.warns(RuntimeWarning, match="legacy/debug Lightning checkpoint path"):
+        backend = inferencer._build_backend()
+
     assert isinstance(backend, LightningCheckpointBackend)
     assert backend.model_class is FakeModel
     assert backend.model_name == "reverse_distillation"
     assert backend.model_source == "explicit"
 
 
-def test_anomaly_inferencer_pt_and_openvino_do_not_require_anomalib_model():
+def test_anomaly_inferencer_engine_mode_uses_engine_checkpoint_backend(monkeypatch):
+    class FakeModel:
+        pass
+
+    class FakeResolved:
+        name = "reverse_distillation"
+        model_class = FakeModel
+        source = "explicit"
+
+    class FakeResolver:
+        def resolve_for_checkpoint(self, model_path, anomalib_model):
+            assert str(model_path) == "model.ckpt"
+            assert anomalib_model == "reverse_distillation"
+            return FakeResolved()
+
+    monkeypatch.setattr("inspection.anomaly_inferencer.AnomalibModelResolver", lambda: FakeResolver())
+    inferencer = AnomalyInferencer(
+        model_path="model.ckpt",
+        device="cpu",
+        model_format="ckpt",
+        anomalib_model="reverse_distillation",
+        checkpoint_inference_mode="engine",
+    )
+
+    backend = inferencer._build_backend()
+
+    assert isinstance(backend, EngineCheckpointBackend)
+    assert backend.model_class is FakeModel
+    assert backend.model_name == "reverse_distillation"
+    assert backend.model_source == "explicit"
+
+
+def test_invalid_checkpoint_inference_mode_fails_clearly():
+    try:
+        AnomalyInferencer(model_path="model.ckpt", model_format="ckpt", checkpoint_inference_mode="magic")
+    except ValueError as exc:
+        assert "model.checkpoint_inference_mode must be one of: direct, engine" in str(exc)
+    else:
+        raise AssertionError("Expected invalid checkpoint inference mode to fail.")
+
+
+def test_anomaly_inferencer_pt_and_openvino_ignore_checkpoint_inference_mode():
     torch_inferencer = AnomalyInferencer(
         model_path="model.pt",
         model_format="torch_export",
         anomalib_model="reverse_distillation",
+        checkpoint_inference_mode="engine",
     )
     openvino_inferencer = AnomalyInferencer(
         model_path="model.xml",
         model_format="openvino",
         anomalib_model="reverse_distillation",
+        checkpoint_inference_mode="engine",
     )
 
     assert isinstance(torch_inferencer._build_backend(), ExportedTorchBackend)
     assert isinstance(openvino_inferencer._build_backend(), OpenVINOBackend)
+
+
+def test_engine_output_conversion_uses_existing_anomaly_result_contract(monkeypatch, tmp_path):
+    class FakeBackend:
+        backend_name = "engine_checkpoint"
+
+        def load(self):
+            pass
+
+        def predict(self, image):
+            return Prediction()
+
+    monkeypatch.setattr(AnomalyInferencer, "_build_backend", lambda self: FakeBackend())
+    model_path = tmp_path / "model.ckpt"
+    model_path.write_bytes(b"fake")
+    inferencer = AnomalyInferencer(
+        model_path=model_path,
+        model_format="ckpt",
+        checkpoint_inference_mode="engine",
+    )
+
+    result = inferencer.predict(np.zeros((16, 16, 3), dtype=np.uint8))
+
+    assert abs(result.anomaly_score - 0.74) < 1e-6
+    assert result.pred_label is True
+    assert result.heatmap.shape == (1, 1, 8, 8)
+    assert result.backend_name == "engine_checkpoint"
+
+
+def test_engine_checkpoint_error_message_is_specific(monkeypatch, tmp_path):
+    class FakeBackend:
+        backend_name = "engine_checkpoint"
+
+        def load(self):
+            pass
+
+        def predict(self, image):
+            raise RuntimeError("predict boom")
+
+    monkeypatch.setattr(AnomalyInferencer, "_build_backend", lambda self: FakeBackend())
+    model_path = tmp_path / "model.ckpt"
+    model_path.write_bytes(b"fake")
+    inferencer = AnomalyInferencer(model_path=model_path, model_format="ckpt")
+
+    result = inferencer.predict(np.zeros((16, 16, 3), dtype=np.uint8))
+
+    assert result.error_message == "Engine checkpoint inference failed: predict boom"
+
+
+def test_engine_checkpoint_backend_uses_temporary_default_root_dir(monkeypatch, tmp_path):
+    calls = []
+
+    class FakeEngine:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    class FakeLoadedModel:
+        def eval(self):
+            pass
+
+        def to(self, device):
+            pass
+
+    class FakeModelClass:
+        @staticmethod
+        def load_from_checkpoint(path, weights_only=False):
+            return FakeLoadedModel()
+
+    monkeypatch.setitem(sys.modules, "anomalib.engine", SimpleNamespace(Engine=FakeEngine))
+    backend = EngineCheckpointBackend(
+        tmp_path / "model.ckpt",
+        device="cpu",
+        model_class=FakeModelClass,
+        model_name="patchcore",
+        model_source="explicit",
+    )
+
+    backend.load()
+
+    assert calls[0]["default_root_dir"] != "results"
+    assert "anomalib_engine_" in str(calls[0]["default_root_dir"])
+    assert calls[0]["accelerator"] == "cpu"
 
 
 def test_lightning_checkpoint_backend_load_uses_injected_model_class(tmp_path):

@@ -1,4 +1,6 @@
 import yaml
+import pytest
+from pathlib import Path
 
 from inspection.config import load_config
 
@@ -58,6 +60,75 @@ def test_config_allows_missing_anomalib_model(tmp_path):
     config = load_config(path)
 
     assert config.model.anomalib_model is None
+    assert config.model.checkpoint_inference_mode == "engine"
+
+
+def test_config_accepts_explicit_engine_checkpoint_inference_mode(tmp_path):
+    path = base_config(
+        tmp_path,
+        {
+            "path": "model.ckpt",
+            "format": "ckpt",
+            "anomaly_threshold": 0.5,
+            "checkpoint_inference_mode": "engine",
+        },
+    )
+
+    config = load_config(path)
+
+    assert config.model.checkpoint_inference_mode == "engine"
+
+
+def test_config_accepts_deprecated_direct_checkpoint_inference_mode_with_warning(tmp_path):
+    path = base_config(
+        tmp_path,
+        {
+            "path": "model.ckpt",
+            "format": "ckpt",
+            "anomaly_threshold": 0.5,
+            "checkpoint_inference_mode": "direct",
+        },
+    )
+
+    with pytest.warns(DeprecationWarning, match="checkpoint_inference_mode is deprecated"):
+        config = load_config(path)
+
+    assert config.model.checkpoint_inference_mode == "direct"
+
+
+def test_config_blank_checkpoint_inference_mode_defaults_to_engine(tmp_path):
+    path = base_config(
+        tmp_path,
+        {
+            "path": "model.ckpt",
+            "format": "ckpt",
+            "anomaly_threshold": 0.5,
+            "checkpoint_inference_mode": "",
+        },
+    )
+
+    config = load_config(path)
+
+    assert config.model.checkpoint_inference_mode == "engine"
+
+
+def test_config_rejects_invalid_checkpoint_inference_mode(tmp_path):
+    path = base_config(
+        tmp_path,
+        {
+            "path": "model.ckpt",
+            "format": "ckpt",
+            "anomaly_threshold": 0.5,
+            "checkpoint_inference_mode": "magic",
+        },
+    )
+
+    try:
+        load_config(path)
+    except ValueError as exc:
+        assert "model.checkpoint_inference_mode must be one of: direct, engine" in str(exc)
+    else:
+        raise AssertionError("Expected invalid checkpoint inference mode to fail.")
 
 
 def test_config_accepts_legacy_checkpoint_path_key(tmp_path):
@@ -105,5 +176,7 @@ def test_config_defaults_blank_project_name(tmp_path):
 
 def test_sample_config_with_project_section_loads():
     config = load_config("configs/inspection.sample.yaml")
+    raw = yaml.safe_load(Path("configs/inspection.sample.yaml").read_text(encoding="utf-8"))
 
     assert config.project.name == "default_job"
+    assert "checkpoint_inference_mode" not in raw["model"]
