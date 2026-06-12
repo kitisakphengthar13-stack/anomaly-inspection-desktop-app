@@ -25,6 +25,16 @@ class Prediction:
         self.anomaly_map = np.ones((1, 1, 8, 8), dtype=np.float32)
 
 
+class FakeOpenVINOInput:
+    names = {"input"}
+
+    def __init__(self, shape):
+        self._shape = shape
+
+    def get_partial_shape(self):
+        return self._shape
+
+
 def test_backend_auto_detection():
     assert detect_model_format("model.ckpt", "auto") == "ckpt"
     assert detect_model_format("model.pt", "auto") == "torch_export"
@@ -331,12 +341,61 @@ def test_openvino_preprocessing_shape_dtype_and_scale():
     image = np.zeros((1024, 1024, 3), dtype=np.uint8)
     image[..., 2] = 255
 
-    tensor = OpenVINOBackend.preprocess(image)
+    backend = OpenVINOBackend("model.xml", device="cpu")
+    backend._configure_input(FakeOpenVINOInput([None, 3, 256, 256]))
+
+    tensor = backend.preprocess(image)
 
     assert tensor.shape == (1, 3, 256, 256)
     assert tensor.dtype == np.float32
     assert np.allclose(tensor[:, 0, :, :], 1.0)
     assert np.allclose(tensor[:, 1:, :, :], 0.0)
+
+
+def test_openvino_preprocessing_uses_non_256_fixed_input_size():
+    image = np.zeros((1024, 1024, 3), dtype=np.uint8)
+    backend = OpenVINOBackend("model.xml", device="cpu")
+    backend._configure_input(FakeOpenVINOInput([1, 3, 384, 384]))
+
+    tensor = backend.preprocess(image)
+
+    assert backend.input_size == (384, 384)
+    assert tensor.shape == (1, 3, 384, 384)
+
+
+def test_openvino_backend_rejects_dynamic_height_width():
+    backend = OpenVINOBackend("model.xml", device="cpu")
+
+    with pytest.raises(ValueError) as exc_info:
+        backend._configure_input(FakeOpenVINOInput([None, 3, None, 256]))
+
+    message = str(exc_info.value)
+    assert "model.xml" in message
+    assert "height or width is dynamic or unavailable" in message
+    assert "fixed-shape exported OpenVINO image model" in message
+
+
+def test_openvino_backend_rejects_non_nchw_layout():
+    backend = OpenVINOBackend("model.xml", device="cpu")
+
+    with pytest.raises(ValueError) as exc_info:
+        backend._configure_input(FakeOpenVINOInput([None, 256, 256, 3]))
+
+    message = str(exc_info.value)
+    assert "model.xml" in message
+    assert "NHWC" in message
+    assert "NCHW" in message
+
+
+def test_openvino_backend_rejects_non_image_like_channels():
+    backend = OpenVINOBackend("model.xml", device="cpu")
+
+    with pytest.raises(ValueError) as exc_info:
+        backend._configure_input(FakeOpenVINOInput([1, 1, 256, 256]))
+
+    message = str(exc_info.value)
+    assert "channel dimension is 1" in message
+    assert "expected 3" in message
 
 
 def test_openvino_backend_output_dict_matches_extractors(tmp_path):
@@ -355,13 +414,37 @@ def test_openvino_backend_output_dict_matches_extractors(tmp_path):
 
     backend = OpenVINOBackend(tmp_path / "model.xml", device="cpu")
     backend.compiled_model = FakeCompiledModel()
-    backend.input_name = "input"
+    backend._configure_input(FakeOpenVINOInput([None, 3, 256, 256]))
 
     prediction = backend.predict(np.zeros((512, 512, 3), dtype=np.uint8))
 
     assert abs(extract_score(prediction) - 0.82) < 1e-6
     assert extract_pred_label(prediction) is True
     assert extract_heatmap(prediction).shape == (1, 1, 256, 256)
+
+
+def test_openvino_backend_output_dict_uses_discovered_384_input_size(tmp_path):
+    class FakeCompiledModel:
+        inputs = ["input"]
+        outputs = ["pred_score", "pred_label", "anomaly_map", "pred_mask"]
+
+        def __call__(self, inputs):
+            assert inputs["input"].shape == (1, 3, 384, 384)
+            return {
+                "pred_score": np.array([0.82], dtype=np.float32),
+                "pred_label": np.array([True]),
+                "anomaly_map": np.ones((1, 1, 384, 384), dtype=np.float32),
+                "pred_mask": np.ones((1, 1, 384, 384), dtype=bool),
+            }
+
+    backend = OpenVINOBackend(tmp_path / "model.xml", device="cpu")
+    backend.compiled_model = FakeCompiledModel()
+    backend._configure_input(FakeOpenVINOInput([None, 3, 384, 384]))
+
+    prediction = backend.predict(np.zeros((512, 512, 3), dtype=np.uint8))
+
+    assert abs(extract_score(prediction) - 0.82) < 1e-6
+    assert extract_heatmap(prediction).shape == (1, 1, 384, 384)
 
 
 def test_openvino_backend_reports_missing_adjacent_bin(tmp_path):

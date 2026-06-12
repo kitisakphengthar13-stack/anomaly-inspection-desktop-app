@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import tempfile
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 import warnings
 
 import cv2
@@ -178,7 +178,6 @@ class OpenVINOBackend(BaseAnomalyBackend):
     """Backend for Anomalib OpenVINO `.xml` exports."""
 
     backend_name = "openvino"
-    input_size = (256, 256)
 
     def __init__(self, model_path: str | Path, device: str = "auto"):
         self.model_path = Path(model_path)
@@ -186,6 +185,8 @@ class OpenVINOBackend(BaseAnomalyBackend):
         self.core: Any = None
         self.compiled_model: Any = None
         self.input_name: Optional[str] = None
+        self.input_size: Optional[tuple[int, int]] = None
+        self.input_shape: str = "unknown"
         self.output_names = ("pred_score", "pred_label", "anomaly_map", "pred_mask")
 
     def load(self) -> None:
@@ -205,22 +206,29 @@ class OpenVINOBackend(BaseAnomalyBackend):
         inputs = list(self.compiled_model.inputs)
         if not inputs:
             raise ValueError(f"OpenVINO model has no inputs: {self.model_path}")
-        self.input_name = input_any_name(inputs[0])
+        self._configure_input(inputs[0])
 
     def predict(self, image_bgr: np.ndarray) -> dict[str, Any]:
-        if self.compiled_model is None or self.input_name is None:
+        if self.compiled_model is None or self.input_name is None or self.input_size is None:
             raise RuntimeError("OpenVINO backend is not loaded.")
         input_tensor = self.preprocess(image_bgr)
         raw_outputs = self.compiled_model({self.input_name: input_tensor})
         return {name: self._output_value(raw_outputs, name) for name in self.output_names}
 
-    @classmethod
-    def preprocess(cls, image_bgr: np.ndarray) -> np.ndarray:
+    def preprocess(self, image_bgr: np.ndarray) -> np.ndarray:
+        if self.input_size is None:
+            raise RuntimeError("OpenVINO backend input shape has not been configured.")
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        image_rgb = cv2.resize(image_rgb, cls.input_size, interpolation=cv2.INTER_AREA)
+        image_rgb = cv2.resize(image_rgb, self.input_size, interpolation=cv2.INTER_AREA)
         tensor = image_rgb.astype(np.float32) / 255.0
         tensor = np.transpose(tensor, (2, 0, 1))
         return np.expand_dims(tensor, axis=0)
+
+    def _configure_input(self, input_port: Any) -> None:
+        self.input_name = input_any_name(input_port)
+        shape = openvino_shape_values(input_port)
+        self.input_shape = shape.representation
+        self.input_size = openvino_nchw_input_size(self.model_path, shape)
 
     def _output_value(self, raw_outputs: Any, output_name: str) -> Any:
         if isinstance(raw_outputs, dict):
@@ -433,6 +441,102 @@ def input_any_name(value: Any) -> str:
         except Exception:
             pass
     return str(value)
+
+
+class OpenVINOInputShape(NamedTuple):
+    dimensions: tuple[Optional[int], ...]
+    representation: str
+
+
+def openvino_shape_values(input_port: Any) -> OpenVINOInputShape:
+    shape = None
+    for attr_name in ("get_partial_shape", "partial_shape", "shape"):
+        attr = getattr(input_port, attr_name, None)
+        if attr is None:
+            continue
+        try:
+            shape = attr() if callable(attr) else attr
+        except Exception:
+            continue
+        if shape is not None:
+            break
+    if shape is None:
+        return OpenVINOInputShape((), "unknown")
+
+    representation = str(shape)
+    try:
+        raw_dimensions = tuple(shape)
+    except TypeError:
+        raw_dimensions = tuple(getattr(shape, "dims", ()))
+    return OpenVINOInputShape(tuple(openvino_dimension_value(dim) for dim in raw_dimensions), representation)
+
+
+def openvino_dimension_value(dimension: Any) -> Optional[int]:
+    is_dynamic = getattr(dimension, "is_dynamic", None)
+    try:
+        if bool(is_dynamic() if callable(is_dynamic) else is_dynamic):
+            return None
+    except Exception:
+        pass
+
+    for attr_name in ("get_length", "get_min_length"):
+        attr = getattr(dimension, attr_name, None)
+        if attr is None:
+            continue
+        try:
+            value = int(attr())
+        except Exception:
+            continue
+        if value >= 0:
+            return value
+
+    text = str(dimension).strip()
+    if text in {"?", "-1", ""}:
+        return None
+    try:
+        value = int(dimension)
+    except Exception:
+        try:
+            value = int(text)
+        except Exception:
+            return None
+    return value if value >= 0 else None
+
+
+def openvino_nchw_input_size(model_path: Path, shape: OpenVINOInputShape) -> tuple[int, int]:
+    dimensions = shape.dimensions
+    if len(dimensions) != 4:
+        raise unsupported_openvino_input_shape_error(model_path, shape.representation, "input rank is not 4")
+
+    _, channels, height, width = dimensions
+    if channels != 3:
+        reason = f"channel dimension is {channels!r}, expected 3 for NCHW RGB input"
+        if dimensions[-1] == 3:
+            reason = "input appears to be NHWC; only fixed NCHW image input is supported"
+        raise unsupported_openvino_input_shape_error(model_path, shape.representation, reason)
+    if height is None or width is None:
+        raise unsupported_openvino_input_shape_error(
+            model_path,
+            shape.representation,
+            "height or width is dynamic or unavailable",
+        )
+    if height <= 0 or width <= 0:
+        raise unsupported_openvino_input_shape_error(
+            model_path,
+            shape.representation,
+            f"height and width must be positive, got H={height}, W={width}",
+        )
+    return (width, height)
+
+
+def unsupported_openvino_input_shape_error(model_path: Path, detected_shape: str, reason: str) -> ValueError:
+    return ValueError(
+        "Unsupported OpenVINO model input shape. "
+        f"Artifact: {model_path}. "
+        f"Detected input shape: {detected_shape}. "
+        f"Reason: {reason}. "
+        "Use a fixed-shape exported OpenVINO image model with NCHW shape [N, 3, H, W]."
+    )
 
 
 def extract_score(prediction: Any) -> Optional[float]:
