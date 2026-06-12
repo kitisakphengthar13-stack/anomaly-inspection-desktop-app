@@ -108,6 +108,43 @@ def test_no_part_skips_anomaly_inference(tmp_path):
     assert stub.calls == 0
 
 
+def test_pipeline_passes_anomalib_model_with_keyword_arguments(tmp_path, monkeypatch):
+    import inspection.pipeline as pipeline_module
+
+    reference_path, zones_path, _, _ = make_pipeline_assets(tmp_path)
+    config = make_config(tmp_path, reference_path, zones_path)
+    config = InspectionConfig(
+        project=config.project,
+        model=ModelConfig(
+            path=tmp_path / "model.ckpt",
+            anomaly_threshold=0.5,
+            device="cpu",
+            format="ckpt",
+            anomalib_model="reverse_distillation",
+        ),
+        presence=config.presence,
+        output=config.output,
+        config_path=config.config_path,
+    )
+    captured = {}
+
+    class FakeInferencer:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def load(self):
+            pass
+
+    monkeypatch.setattr(pipeline_module, "AnomalyInferencer", FakeInferencer)
+    pipeline = InspectionPipeline(config)
+
+    pipeline.prepare_anomaly_backend()
+
+    assert captured["model_path"] == tmp_path / "model.ckpt"
+    assert captured["model_format"] == "ckpt"
+    assert captured["anomalib_model"] == "reverse_distillation"
+
+
 def test_part_present_low_score_returns_ok(tmp_path):
     reference_path, zones_path, _, part_path = make_pipeline_assets(tmp_path)
     stub = StubAnomalyInferencer(score=0.1, pred_label=None)

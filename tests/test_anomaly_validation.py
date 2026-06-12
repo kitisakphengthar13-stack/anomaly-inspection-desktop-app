@@ -1,4 +1,5 @@
-from inspection.anomaly_validation import ValidationRow, compute_metrics, iter_labeled_images
+from inspection.anomaly_validation import ValidationRow, compute_metrics, iter_labeled_images, run_anomaly_validation
+from inspection.config import InspectionConfig, ModelConfig, OutputConfig, PresenceConfig, ProjectConfig
 
 
 def test_folder_mapping_good_bad(tmp_path):
@@ -42,3 +43,44 @@ def test_compute_metrics_with_pred_label():
     assert metrics["TN"] == 1
     assert metrics["FP"] == 1
     assert metrics["FN"] == 1
+
+
+def test_run_anomaly_validation_passes_explicit_anomalib_model(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeInferencer:
+        backend_name = "lightning_checkpoint"
+
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def load(self):
+            pass
+
+    monkeypatch.setattr("inspection.anomaly_validation.AnomalyInferencer", FakeInferencer)
+    (tmp_path / "good").mkdir()
+    config = InspectionConfig(
+        project=ProjectConfig(name="RD"),
+        model=ModelConfig(
+            path=tmp_path / "model.ckpt",
+            anomaly_threshold=0.5,
+            device="cpu",
+            format="ckpt",
+            anomalib_model="reverse_distillation",
+        ),
+        presence=PresenceConfig(reference_image_path=tmp_path / "ref.png", zones_path=tmp_path / "zones.json"),
+        output=OutputConfig(),
+        config_path=tmp_path / "inspection.yaml",
+    )
+
+    run_anomaly_validation(
+        config=config,
+        test_root=tmp_path,
+        normal_folders=["good"],
+        abnormal_folders=[],
+        output_dir=tmp_path / "out",
+    )
+
+    assert captured["model_path"] == tmp_path / "model.ckpt"
+    assert captured["model_format"] == "ckpt"
+    assert captured["anomalib_model"] == "reverse_distillation"

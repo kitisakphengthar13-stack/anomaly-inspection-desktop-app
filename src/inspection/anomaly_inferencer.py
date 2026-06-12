@@ -8,6 +8,7 @@ import numpy as np
 
 from inspection.result_types import AnomalyResult
 from inspection.visualization import try_save_heatmap
+from inspection.anomalib_model_resolver import AnomalibModelResolver
 
 
 class BaseAnomalyBackend:
@@ -56,35 +57,41 @@ class LightningCheckpointBackend(BaseAnomalyBackend):
 
     backend_name = "lightning_checkpoint"
 
-    def __init__(self, model_path: str | Path, device: str = "auto"):
+    def __init__(
+        self,
+        model_path: str | Path,
+        device: str = "auto",
+        *,
+        model_class: Any | None = None,
+        model_name: str | None = None,
+        model_source: str | None = None,
+    ):
         super().__init__(model_path, device)
         self.model: Any = None
+        self.model_class = model_class
+        self.model_name = model_name or "unknown"
+        self.model_source = model_source or "unknown"
 
     def load(self) -> None:
-        model_cls = self._find_lightning_model_class()
-        self.model = model_cls.load_from_checkpoint(str(self.model_path), weights_only=False)
+        if self.model_class is None:
+            resolved = AnomalibModelResolver().resolve_for_checkpoint(self.model_path, None)
+            self.model_class = resolved.model_class
+            self.model_name = resolved.name
+            self.model_source = resolved.source
+        try:
+            self.model = self.model_class.load_from_checkpoint(str(self.model_path), weights_only=False)
+        except Exception as exc:
+            if self.model_source == "legacy_default":
+                raise RuntimeError(
+                    "Lightning checkpoint loading failed after using the legacy PatchCore fallback. "
+                    "No model.anomalib_model was set, so the checkpoint was loaded as PatchCore. "
+                    "If this checkpoint is not PatchCore, set model.anomalib_model explicitly "
+                    "(for example, reverse_distillation). "
+                    f"Original error: {exc}"
+                ) from exc
+            raise
         self.model.eval()
         self.model.to(self.device)
-
-    @staticmethod
-    def _find_lightning_model_class() -> Any:
-        import anomalib.models as models
-
-        for name in ("Patchcore", "PatchCore"):
-            if hasattr(models, name):
-                return getattr(models, name)
-        try:
-            from anomalib.models.image.patchcore import Patchcore
-
-            return Patchcore
-        except Exception:
-            pass
-        try:
-            from anomalib.models.image.patchcore import PatchCore
-
-            return PatchCore
-        except Exception as exc:
-            raise ImportError("Could not find an Anomalib PatchCore Lightning model class.") from exc
 
     def predict(self, image_bgr: np.ndarray) -> Any:
         import torch
@@ -173,12 +180,14 @@ class AnomalyInferencer:
         anomaly_threshold: float = 0.5,
         device: str = "auto",
         model_format: str = "auto",
+        anomalib_model: str | None = None,
     ):
         self.model_path = Path(model_path)
         self.anomaly_threshold = float(anomaly_threshold)
         self.requested_device = device
         self.device = resolve_device(device)
         self.model_format = model_format
+        self.anomalib_model = anomalib_model
         self.backend: Optional[BaseAnomalyBackend] = None
         self.backend_name: Optional[str] = None
         self._loaded = False
@@ -198,7 +207,14 @@ class AnomalyInferencer:
         if model_format == "torch_export":
             return ExportedTorchBackend(self.model_path, self.device)
         if model_format == "ckpt":
-            return LightningCheckpointBackend(self.model_path, self.device)
+            resolved = AnomalibModelResolver().resolve_for_checkpoint(self.model_path, self.anomalib_model)
+            return LightningCheckpointBackend(
+                self.model_path,
+                self.device,
+                model_class=resolved.model_class,
+                model_name=resolved.name,
+                model_source=resolved.source,
+            )
         if model_format == "openvino":
             return OpenVINOBackend(self.model_path, self.requested_device)
         raise ValueError(f"Unsupported model format '{model_format}'.")

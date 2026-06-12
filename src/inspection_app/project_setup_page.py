@@ -100,6 +100,7 @@ class ProjectSetupPage(QWidget):
         for widget in (
             self.job_name_edit,
             self.model_path_edit,
+            self.anomalib_model_edit,
             self.reference_path_edit,
             self.zones_path_edit,
         ):
@@ -250,6 +251,10 @@ class ProjectSetupPage(QWidget):
         self.model_format_combo = QComboBox()
         self.model_format_combo.addItems(["auto", "ckpt", "torch_export", "openvino"])
         form.addRow("Model artifact type", self.model_format_combo)
+
+        self.anomalib_model_edit = QLineEdit()
+        self.anomalib_model_edit.setPlaceholderText("Required for non-PatchCore .ckpt, e.g. reverse_distillation")
+        form.addRow("Anomalib model", self.anomalib_model_edit)
 
         self.anomaly_threshold_spin = QDoubleSpinBox()
         self.anomaly_threshold_spin.setRange(0.0, 1_000_000_000.0)
@@ -402,6 +407,7 @@ class ProjectSetupPage(QWidget):
         self._update_inspection_job_state(self.job_name_edit.text())
         self.model_path_edit.setText(str(model.get("path", model.get("checkpoint_path", ""))))
         self._set_combo_value(self.model_format_combo, str(model.get("format", "auto")))
+        self.anomalib_model_edit.setText(str(model.get("anomalib_model") or ""))
         self.anomaly_threshold_spin.setValue(float(model.get("anomaly_threshold", 0.5)))
         self._set_combo_value(self.device_combo, str(model.get("device", "auto")))
 
@@ -442,6 +448,7 @@ class ProjectSetupPage(QWidget):
             "model": {
                 "path": self.model_path_edit.text().strip(),
                 "format": self.model_format_combo.currentText(),
+                "anomalib_model": self.anomalib_model_edit.text().strip(),
                 "anomaly_threshold": self.anomaly_threshold_spin.value(),
                 "device": self.device_combo.currentText(),
             },

@@ -25,6 +25,7 @@ def default_config_data(repo_root: Path | None = None) -> dict[str, Any]:
         "model": {
             "path": "path/to/anomaly_model.pt",
             "format": "auto",
+            "anomalib_model": "",
             "anomaly_threshold": 0.5,
             "device": "auto",
         },
@@ -50,16 +51,19 @@ def default_config_data(repo_root: Path | None = None) -> dict[str, Any]:
 
 
 def config_to_yaml_data(config: InspectionConfig) -> dict[str, Any]:
+    model_data = {
+        "path": str(config.model.path),
+        "format": config.model.format,
+        "anomaly_threshold": config.model.anomaly_threshold,
+        "device": config.model.device,
+    }
+    if config.model.anomalib_model:
+        model_data["anomalib_model"] = config.model.anomalib_model
     return {
         "project": {
             "name": config.project.name,
         },
-        "model": {
-            "path": str(config.model.path),
-            "format": config.model.format,
-            "anomaly_threshold": config.model.anomaly_threshold,
-            "device": config.model.device,
-        },
+        "model": model_data,
         "presence": {
             "reference_image_path": str(config.presence.reference_image_path),
             "zones_path": str(config.presence.zones_path),

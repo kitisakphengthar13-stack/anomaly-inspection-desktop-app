@@ -55,10 +55,11 @@ def run_anomaly_validation(
     output_dir.mkdir(parents=True, exist_ok=True)
     image_items = list(iter_labeled_images(test_root, normal_folders, abnormal_folders))
     inferencer = AnomalyInferencer(
-        config.model.path,
+        model_path=config.model.path,
         anomaly_threshold=config.model.anomaly_threshold,
         device=config.model.device,
         model_format=config.model.format,
+        anomalib_model=config.model.anomalib_model,
     )
     inferencer.load()
 

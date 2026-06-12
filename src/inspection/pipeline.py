@@ -61,10 +61,11 @@ class InspectionPipeline:
     def _get_anomaly_inferencer(self) -> AnomalyInferencer:
         if self.anomaly_inferencer is None:
             self.anomaly_inferencer = AnomalyInferencer(
-                self.config.model.path,
-                self.config.model.anomaly_threshold,
-                self.config.model.device,
-                self.config.model.format,
+                model_path=self.config.model.path,
+                anomaly_threshold=self.config.model.anomaly_threshold,
+                device=self.config.model.device,
+                model_format=self.config.model.format,
+                anomalib_model=self.config.model.anomalib_model,
             )
         return self.anomaly_inferencer
 

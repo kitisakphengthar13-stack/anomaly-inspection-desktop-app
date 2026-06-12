@@ -36,6 +36,30 @@ def test_config_accepts_openvino_model_format(tmp_path):
     assert config.model.device == "cpu"
 
 
+def test_config_accepts_optional_anomalib_model(tmp_path):
+    path = base_config(
+        tmp_path,
+        {
+            "path": "model.ckpt",
+            "format": "ckpt",
+            "anomalib_model": "reverse_distillation",
+            "anomaly_threshold": 0.5,
+        },
+    )
+
+    config = load_config(path)
+
+    assert config.model.anomalib_model == "reverse_distillation"
+
+
+def test_config_allows_missing_anomalib_model(tmp_path):
+    path = base_config(tmp_path, {"path": "model.ckpt", "format": "ckpt", "anomaly_threshold": 0.5})
+
+    config = load_config(path)
+
+    assert config.model.anomalib_model is None
+
+
 def test_config_accepts_legacy_checkpoint_path_key(tmp_path):
     path = base_config(tmp_path, {"checkpoint_path": "model.ckpt", "anomaly_threshold": 1.0})
 

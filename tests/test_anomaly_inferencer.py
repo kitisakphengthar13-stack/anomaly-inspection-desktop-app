@@ -1,6 +1,9 @@
 import numpy as np
 
 from inspection.anomaly_inferencer import (
+    AnomalyInferencer,
+    ExportedTorchBackend,
+    LightningCheckpointBackend,
     OpenVINOBackend,
     detect_model_format,
     extract_heatmap,
@@ -23,6 +26,133 @@ def test_backend_auto_detection():
     assert detect_model_format("model.anything", "ckpt") == "ckpt"
     assert detect_model_format("model.anything", "torch_export") == "torch_export"
     assert detect_model_format("model.anything", "openvino") == "openvino"
+
+
+def test_anomaly_inferencer_ckpt_uses_resolved_anomalib_model(monkeypatch):
+    class FakeModel:
+        pass
+
+    class FakeResolved:
+        name = "reverse_distillation"
+        model_class = FakeModel
+        source = "explicit"
+
+    class FakeResolver:
+        def resolve_for_checkpoint(self, model_path, anomalib_model):
+            assert str(model_path) == "model.ckpt"
+            assert anomalib_model == "reverse_distillation"
+            return FakeResolved()
+
+    monkeypatch.setattr("inspection.anomaly_inferencer.AnomalibModelResolver", lambda: FakeResolver())
+    inferencer = AnomalyInferencer(
+        model_path="model.ckpt",
+        anomaly_threshold=0.5,
+        device="cpu",
+        model_format="ckpt",
+        anomalib_model="reverse_distillation",
+    )
+
+    backend = inferencer._build_backend()
+
+    assert isinstance(backend, LightningCheckpointBackend)
+    assert backend.model_class is FakeModel
+    assert backend.model_name == "reverse_distillation"
+    assert backend.model_source == "explicit"
+
+
+def test_anomaly_inferencer_pt_and_openvino_do_not_require_anomalib_model():
+    torch_inferencer = AnomalyInferencer(
+        model_path="model.pt",
+        model_format="torch_export",
+        anomalib_model="reverse_distillation",
+    )
+    openvino_inferencer = AnomalyInferencer(
+        model_path="model.xml",
+        model_format="openvino",
+        anomalib_model="reverse_distillation",
+    )
+
+    assert isinstance(torch_inferencer._build_backend(), ExportedTorchBackend)
+    assert isinstance(openvino_inferencer._build_backend(), OpenVINOBackend)
+
+
+def test_lightning_checkpoint_backend_load_uses_injected_model_class(tmp_path):
+    calls = []
+
+    class FakeLoadedModel:
+        def eval(self):
+            calls.append("eval")
+
+        def to(self, device):
+            calls.append(("to", device))
+
+    class FakeModelClass:
+        @staticmethod
+        def load_from_checkpoint(path, weights_only=False):
+            calls.append((path, weights_only))
+            return FakeLoadedModel()
+
+    model_path = tmp_path / "model.ckpt"
+    backend = LightningCheckpointBackend(model_path, device="cpu", model_class=FakeModelClass, model_name="fake_model")
+
+    backend.load()
+
+    assert calls == [(str(model_path), False), "eval", ("to", "cpu")]
+
+
+def test_lightning_checkpoint_backend_legacy_fallback_failure_has_context(tmp_path):
+    class FailingModelClass:
+        @staticmethod
+        def load_from_checkpoint(path, weights_only=False):
+            raise RuntimeError("state_dict mismatch")
+
+    backend = LightningCheckpointBackend(
+        tmp_path / "model.ckpt",
+        device="cpu",
+        model_class=FailingModelClass,
+        model_name="patchcore",
+        model_source="legacy_default",
+    )
+
+    try:
+        backend.load()
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "No model.anomalib_model was set" in message
+        assert "legacy PatchCore fallback" in message
+        assert "set model.anomalib_model explicitly" in message
+        assert "state_dict mismatch" in message
+    else:
+        raise AssertionError("Expected legacy fallback load failure to include corrective context.")
+
+
+def test_lightning_checkpoint_backend_legacy_patchcore_success_still_loads(tmp_path):
+    calls = []
+
+    class FakeLoadedModel:
+        def eval(self):
+            calls.append("eval")
+
+        def to(self, device):
+            calls.append(("to", device))
+
+    class FakePatchcoreClass:
+        @staticmethod
+        def load_from_checkpoint(path, weights_only=False):
+            calls.append((path, weights_only))
+            return FakeLoadedModel()
+
+    backend = LightningCheckpointBackend(
+        tmp_path / "model.ckpt",
+        device="cpu",
+        model_class=FakePatchcoreClass,
+        model_name="patchcore",
+        model_source="legacy_default",
+    )
+
+    backend.load()
+
+    assert calls == [(str(tmp_path / "model.ckpt"), False), "eval", ("to", "cpu")]
 
 
 def test_prediction_extractors_return_plain_values():

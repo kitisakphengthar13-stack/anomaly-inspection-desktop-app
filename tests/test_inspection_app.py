@@ -626,6 +626,7 @@ def test_config_io_saves_backend_compatible_yaml(tmp_path):
     data = default_config_data()
     data["project"]["name"] = "Metal Surface"
     data["model"]["path"] = "model.pt"
+    data["model"]["anomalib_model"] = "reverse_distillation"
     data["presence"]["reference_image_path"] = "data/reference/empty_reference.png"
     data["presence"]["zones_path"] = "configs/zones.json"
     data["output"]["show_images"] = True
@@ -636,12 +637,14 @@ def test_config_io_saves_backend_compatible_yaml(tmp_path):
     loaded = load_config(path)
     assert loaded.project.name == "Metal Surface"
     assert loaded.model.path == tmp_path / "model.pt"
+    assert loaded.model.anomalib_model == "reverse_distillation"
     assert loaded.presence.pixel_diff_threshold == 30
     assert loaded.output.show_images is True
 
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert list(raw) == ["project", "model", "presence", "output"]
     assert raw["project"]["name"] == "Metal Surface"
+    assert raw["model"]["anomalib_model"] == "reverse_distillation"
 
 
 def test_config_io_validation_uses_backend_rules():
@@ -837,6 +840,7 @@ def test_project_setup_page_uses_shared_ui_components():
     assert page.findChild(QWidget, "runtimePreparationRow") is not None
     assert "Not prepared:" in page.runtime_banner.text()
     assert page.model_path_edit is not None
+    assert page.anomalib_model_edit is not None
     assert page.reference_path_edit is not None
     assert page.zones_path_edit is not None
     assert page.anomaly_threshold_spin.decimals() == 3
@@ -847,6 +851,18 @@ def test_project_setup_page_uses_shared_ui_components():
     page.presence_tuning_button.setChecked(True)
 
     assert page.presence_tuning_widget.isHidden() is False
+
+
+def test_project_setup_preserves_anomalib_model_field():
+    app = QApplication.instance() or QApplication([])
+    page = ProjectSetupPage(AppState())
+    data = default_config_data()
+    data["model"]["anomalib_model"] = "reverse_distillation"
+
+    page.populate_from_data(data)
+
+    assert page.anomalib_model_edit.text() == "reverse_distillation"
+    assert page.to_config_data()["model"]["anomalib_model"] == "reverse_distillation"
 
 
 def test_project_setup_prepare_runtime_is_primary_only_when_action_is_needed():

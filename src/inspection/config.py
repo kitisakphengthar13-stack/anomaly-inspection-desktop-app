@@ -25,6 +25,7 @@ class ModelConfig:
     anomaly_threshold: float
     device: str = "auto"
     format: str = "auto"
+    anomalib_model: str | None = None
 
     @property
     def checkpoint_path(self) -> Path:
@@ -132,11 +133,13 @@ def load_config(config_path: str | Path) -> InspectionConfig:
     if model_format not in {"auto", "ckpt", "torch_export", "pt", "torch", "openvino", "xml"}:
         raise ValueError("model.format must be one of: auto, ckpt, torch_export, openvino.")
 
+    anomalib_model_value = str(model_data["anomalib_model"]).strip() if model_data.get("anomalib_model") is not None else None
     model = ModelConfig(
         path=_resolve_path(str(model_path_value), base_dir),
         anomaly_threshold=threshold,
         device=str(model_data.get("device", "auto")),
         format="torch_export" if model_format in {"pt", "torch"} else "openvino" if model_format == "xml" else model_format,
+        anomalib_model=anomalib_model_value or None,
     )
     presence = PresenceConfig(
         reference_image_path=_resolve_path(str(presence_data["reference_image_path"]), base_dir),

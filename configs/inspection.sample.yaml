@@ -5,6 +5,7 @@ project:
 model:
   path: "path/to/anomaly_model.xml"
   format: "auto"  # auto, ckpt, torch_export, openvino
+  anomalib_model: ""  # for ckpt, set explicitly such as patchcore or reverse_distillation
   anomaly_threshold: 0.5
   device: "auto"
 
