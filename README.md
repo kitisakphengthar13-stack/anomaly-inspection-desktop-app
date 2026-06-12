@@ -412,6 +412,63 @@ false_positives.csv
 summary.txt
 ```
 
+## Image Model Compatibility Tools
+
+The repository includes two local tools for checking Anomalib image-model artifacts against the app runtime. These tools do not train models, export models, download datasets, or discover artifacts automatically. They validate only local artifacts and local test images that you provide.
+
+Single artifact validation:
+
+```bash
+python tools/validate_anomalib_artifact.py \
+  --model-name patchcore \
+  --artifact-path path/to/model.xml \
+  --format openvino \
+  --image-path path/to/test_image.png \
+  --device cpu \
+  --output-json outputs/compatibility/single_artifact.json
+```
+
+Matrix validation from a manifest:
+
+```bash
+python tools/run_compatibility_matrix.py \
+  --manifest configs/compatibility_matrix.local.yaml \
+  --output-json outputs/compatibility/matrix.json \
+  --output-csv outputs/compatibility/matrix.csv
+```
+
+Start from the placeholder-only example:
+
+```text
+configs/compatibility_matrix_example.yaml
+```
+
+Copy it to a local manifest such as `configs/compatibility_matrix.local.yaml`, then replace the placeholder paths with local model artifacts and test images. Local compatibility manifests remain ignored by Git; do not commit absolute local paths, datasets, model artifacts, or generated reports.
+
+The compatibility tools are image-only. They target single-image anomaly inspection artifacts:
+
+```text
+ckpt         -> Anomalib Engine checkpoint inference
+torch_export -> exported Torch inference
+openvino     -> OpenVINO inference
+```
+
+Video models such as `ai_vad` and `fuvas` are out of scope for this desktop image inspection runtime. Image-special models such as prompt-based, few-shot, API-backed, or foundation-model workflows may be listed in a manifest, but they should be marked with `support_level` or `notes` when they need extra runtime design.
+
+Status meanings:
+
+```text
+verified_pass                  artifact loaded and predicted successfully for one image
+verified_fail                  artifact or prediction failed for the supplied row
+no_local_artifact              artifact was not available locally; this is unverified, not unsupported
+needs_special_handling         model/runtime needs extra design beyond normal single-image inspection
+unsupported_not_image_runtime  video or non-image runtime; not a target for this project
+unsupported_special_runtime    special runtime requirement blocks validation
+unknown_needs_investigation    status could not be classified yet
+```
+
+`verified_pass` is narrow evidence: one artifact and one image passed through the selected backend. It is not a blanket support claim for an entire Anomalib model family. Claim production support only after enough representative artifacts and images pass for the intended deployment conditions.
+
 ## Inspection Outputs
 
 ```text

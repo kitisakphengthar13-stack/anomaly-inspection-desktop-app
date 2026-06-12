@@ -19,6 +19,7 @@ dist/
 # Local machine-specific configs and generated zones.
 configs/*.yaml
 !configs/inspection.sample.yaml
+!configs/compatibility_matrix_example.yaml
 configs/*.json
 !configs/zones.sample.json
 run_app.ps1

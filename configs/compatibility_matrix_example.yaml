@@ -1,0 +1,65 @@
+# Example manifest for image-only Anomalib artifact compatibility validation.
+# Copy this file to configs/compatibility_matrix.local.yaml and replace the
+# placeholder paths with local artifacts and test images.
+#
+# This file intentionally uses placeholder paths only. Do not commit local
+# absolute paths, model files, datasets, or generated validation outputs.
+
+artifacts:
+  - id: patchcore_ckpt_example
+    model_name: patchcore
+    format: ckpt
+    artifact_path: "path/to/patchcore/model.ckpt"
+    image_path: "path/to/test_image.png"
+    device: cpu
+    anomaly_threshold: 0.5
+    support_level: experimental
+    expected_status: verified_pass
+    notes: "Lightning checkpoint validation uses Anomalib Engine.predict."
+    tags: [image, ckpt, patchcore]
+
+  - id: reverse_distillation_pt_example
+    model_name: reverse_distillation
+    format: torch_export
+    artifact_path: "path/to/reverse_distillation/model.pt"
+    image_path: "path/to/test_image.png"
+    device: cpu
+    anomaly_threshold: 0.5
+    support_level: experimental
+    expected_status: verified_pass
+    notes: "Exported Torch validation uses the app exported-Torch backend."
+    tags: [image, torch_export, reverse_distillation]
+
+  - id: patchcore_openvino_example
+    model_name: patchcore
+    format: openvino
+    artifact_path: "path/to/openvino/model.xml"
+    image_path: "path/to/test_image.png"
+    device: cpu
+    anomaly_threshold: 0.5
+    support_level: experimental
+    expected_status: verified_pass
+    notes: "OpenVINO validation expects an adjacent model.bin file."
+    tags: [image, openvino, patchcore]
+
+  - id: winclip_special_example
+    model_name: win_clip
+    format: ckpt
+    artifact_path: ""
+    image_path: ""
+    device: cpu
+    anomaly_threshold: 0.5
+    support_level: developer_only
+    expected_status: needs_special_handling
+    notes: "Image-special model; prompt/few-shot behavior needs explicit validation design."
+    tags: [image, special_runtime]
+
+  - id: video_model_out_of_scope_example
+    model_name: ai_vad
+    format: ckpt
+    artifact_path: ""
+    image_path: ""
+    support_level: not_target
+    expected_status: unsupported_not_image_runtime
+    notes: "Video models are out of scope for this desktop single-image inspection app."
+    tags: [video, out_of_scope]
