@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QStackedWidget,
@@ -37,6 +38,7 @@ from inspection_app.formatting import (
     format_threshold,
 )
 from inspection_app.icons import app_logo_path, app_window_icon, qtawesome_available, state_icon
+from inspection_app.layout_contracts import ActionSection, ControlRail, ElidedValueLabel, WorkbenchLayout
 from inspection_app.inspect_camera_page import (
     InspectCameraPage,
     captured_image_path,
@@ -124,6 +126,15 @@ from inspection_app.zone_editor_page import (
     save_zone_session,
 )
 from inspection.result_types import FinalResult, InspectionResult
+
+
+def has_ancestor(widget: QWidget, ancestor_type: type[QWidget], object_name: str | None = None) -> bool:
+    parent = widget.parentWidget()
+    while parent is not None:
+        if isinstance(parent, ancestor_type) and (object_name is None or parent.objectName() == object_name):
+            return True
+        parent = parent.parentWidget()
+    return False
 
 
 def test_app_state_defaults():
@@ -508,6 +519,82 @@ def test_scrollable_workflow_rail_uses_comfortable_theme_widths():
     assert pane.minimumSizeHint().width() == dimensions.workflow_rail_min_width
 
 
+def test_elided_value_label_preserves_full_text_in_tooltip():
+    app = QApplication.instance() or QApplication([])
+    text = "D:/very/long/path/to/model/exported/openvino/model.xml"
+    label = ElidedValueLabel(text)
+
+    assert label.full_text() == text
+    assert label.toolTip() == text
+    assert label.wordWrap() is False
+    assert label.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Ignored
+
+    label.set_full_text("short")
+    assert label.full_text() == "short"
+    assert label.toolTip() == "short"
+
+
+def test_action_section_has_fixed_vertical_contract():
+    app = QApplication.instance() or QApplication([])
+    section = ActionSection(rows=2)
+    first = QPushButton("First")
+    second = QPushButton("Second")
+    first_row = section.add_row((first,))
+    second_row = section.add_row((second,))
+
+    assert section.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Fixed
+    assert first.minimumHeight() == theme_dimensions().button_min_height
+    assert second.minimumHeight() == theme_dimensions().button_min_height
+    assert section.minimumHeight() >= first_row.sizeHint().height() + second_row.sizeHint().height()
+    assert section.maximumHeight() > section.minimumHeight()
+    assert not has_ancestor(section, QScrollArea)
+
+
+def test_action_section_reserves_real_button_size_hint_height():
+    app = QApplication.instance() or QApplication([])
+    section = ActionSection(rows=1)
+    button = QPushButton("Run Inspection")
+    row = section.add_row((button,), align_right=True)
+
+    assert button.minimumHeight() == theme_dimensions().button_min_height
+    assert row.sizeHint().height() >= button.sizeHint().height()
+    assert section.minimumHeight() >= row.sizeHint().height()
+
+
+def test_control_rail_bounds_width_and_keeps_fixed_widgets_outside_scroll():
+    app = QApplication.instance() or QApplication([])
+    rail = ControlRail(object_name="testControlRail")
+    fixed = QPushButton("Run")
+    secondary = QLabel("Secondary")
+
+    rail.add_fixed(fixed)
+    scroll = rail.set_scroll_body(secondary, object_name="testControlRailScroll")
+
+    assert rail.minimumWidth() == theme_dimensions().workflow_rail_min_width
+    assert rail.maximumWidth() == theme_dimensions().workflow_rail_size_hint_width
+    assert rail.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Fixed
+    assert scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    assert has_ancestor(fixed, QScrollArea) is False
+    assert has_ancestor(secondary, QScrollArea, "testControlRailScroll") is True
+
+
+def test_workbench_layout_uses_non_collapsible_bounded_rail_and_expanding_workspace():
+    app = QApplication.instance() or QApplication([])
+    workbench = WorkbenchLayout(object_name="testWorkbench")
+    rail = ControlRail(object_name="testRail")
+    workspace = QWidget()
+
+    workbench.set_control_rail(rail)
+    workbench.set_main_workspace(workspace)
+
+    assert workbench.childrenCollapsible() is False
+    assert workbench.count() == 2
+    assert workbench.widget(0) is rail
+    assert workbench.widget(1) is workspace
+    assert rail.maximumWidth() == theme_dimensions().workflow_rail_size_hint_width
+    assert workspace.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
+
+
 def test_main_window_wraps_pages_in_scrollable_content_host():
     app = QApplication.instance() or QApplication([])
     window = MainWindow(AppState())
@@ -516,6 +603,21 @@ def test_main_window_wraps_pages_in_scrollable_content_host():
 
     assert isinstance(first_page_host, QScrollArea)
     assert first_page_host.widgetResizable() is True
+
+
+def test_main_window_uses_workbench_host_for_inspect_image_only():
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(AppState())
+
+    assert isinstance(window._stack.widget(0), QScrollArea)
+    assert isinstance(window._stack.widget(1), QScrollArea)
+    assert isinstance(window._stack.widget(2), QScrollArea)
+    assert window._stack.widget(3) is window._inspect_image_page
+    assert not isinstance(window._stack.widget(3), QScrollArea)
+    assert window._stack.widget(4) is window._inspect_camera_page
+    assert not isinstance(window._stack.widget(4), QScrollArea)
+    assert isinstance(window._stack.widget(5), QScrollArea)
+
 
 
 def test_main_window_top_navigation_contains_workflow_group_labels_and_buttons():
@@ -617,10 +719,10 @@ def test_desktop_pages_do_not_repeat_body_page_headers():
     window = MainWindow(AppState())
 
     for index in range(window._stack.count()):
-        scroll = window._stack.widget(index)
-        assert isinstance(scroll, QScrollArea)
-        assert not scroll.widget().findChildren(QLabel, "pageHeaderTitle")
-        assert not scroll.widget().findChildren(QLabel, "pageHeaderSubtitle")
+        host = window._stack.widget(index)
+        page = host.widget() if isinstance(host, QScrollArea) else host
+        assert not page.findChildren(QLabel, "pageHeaderTitle")
+        assert not page.findChildren(QLabel, "pageHeaderSubtitle")
 
 
 def test_config_io_saves_backend_compatible_yaml(tmp_path):
@@ -1177,6 +1279,27 @@ def test_aspect_image_label_default_preview_remains_center_aligned():
     assert center_color.green() > 200
 
 
+def test_aspect_image_label_repaints_non_black_frame_after_resize():
+    app = QApplication.instance() or QApplication([])
+    widget = AspectImageLabel()
+    pixmap = QPixmap(160, 90)
+    pixmap.fill(QColor(0, 0, 255))
+
+    widget.resize(1, 1)
+    widget.show()
+    widget.set_frame_pixmap(pixmap)
+    app.processEvents()
+    widget.resize(320, 180)
+    app.processEvents()
+
+    image = widget.grab().toImage()
+    center_color = QColor(image.pixel(image.width() // 2, image.height() // 2))
+
+    assert widget._source_pixmap is not None
+    assert not widget._source_pixmap.isNull()
+    assert center_color.blue() > 200
+
+
 def test_reference_capture_page_uses_compact_controls_and_workspace():
     app = QApplication.instance() or QApplication([])
     page = ReferenceCapturePage(AppState())
@@ -1229,6 +1352,55 @@ def test_reference_capture_preview_workspace_is_stable_when_feedback_grows():
     app.processEvents()
 
     assert workspace.sizeHint() == before
+
+
+def test_reference_capture_live_frame_renders_visible_non_black_preview():
+    app = QApplication.instance() or QApplication([])
+    page = ReferenceCapturePage(AppState())
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    frame[:, :, 0] = 255
+
+    page.resize(1366, 768)
+    page.show()
+    page._set_state("live_preview")
+    page._camera_lifecycle = "starting"
+    page._on_frame_ready(frame)
+    app.processEvents()
+    page.resize(1200, 720)
+    app.processEvents()
+
+    image = page.preview_label.grab().toImage()
+    center_color = QColor(image.pixel(image.width() // 2, image.height() // 2))
+
+    assert page.preview_label.isVisible()
+    assert page.preview_label._source_pixmap is not None
+    assert not page.preview_label._source_pixmap.isNull()
+    assert center_color.blue() > 200
+    assert center_color.red() < 40
+    assert center_color.green() < 40
+
+    page.close()
+
+
+def test_reference_capture_stale_session_frame_is_ignored():
+    app = QApplication.instance() or QApplication([])
+    page = ReferenceCapturePage(AppState())
+    current_frame = np.zeros((12, 20, 3), dtype=np.uint8)
+    current_frame[:, :] = (255, 0, 0)
+    stale_frame = np.zeros((12, 20, 3), dtype=np.uint8)
+    stale_frame[:, :] = (0, 255, 0)
+
+    page._camera_session_id = 2
+    page._camera_lifecycle = "running"
+    page._state = "live_preview"
+    page._on_frame_ready_for_session(2, current_frame)
+    source_before = page.preview_label._source_pixmap
+    latest_before = page._latest_frame
+
+    page._on_frame_ready_for_session(1, stale_frame)
+
+    assert page._latest_frame is latest_before
+    assert page.preview_label._source_pixmap is source_before
 
 
 def test_default_zones_output_path_uses_app_state():
@@ -1586,9 +1758,10 @@ def test_inspect_image_page_summary_widgets_exist():
 
     assert page.inputs_panel.property("density") == "compact"
     assert page.inputs_panel.findChild(QLabel).text() == "Input Image"
-    assert isinstance(page.workspace, QSplitter)
+    assert isinstance(page.workspace, WorkbenchLayout)
     assert page.findChild(QScrollArea, "inspectImageLeftPaneScroll") is not None
     assert page.findChild(QWidget, "inspectImageLeftPane") is not None
+    assert page.findChild(QWidget, "inspectImageSecondaryPane") is not None
     assert isinstance(page.summary_panel, ResultSummaryPanel)
     assert page.summary_panel.csv_label.text() == "CSV Log Path"
     assert page.summary_panel.error_label.text() == "Error Message"
@@ -1599,10 +1772,36 @@ def test_inspect_image_page_summary_widgets_exist():
     assert page.operation_state_banner.property("state") == "blocked"
     assert page.run_button.text() == "Run Inspection"
     assert page.open_output_button.text() == "Open Output Folder"
+    action_section = page.findChild(ActionSection, "actionSection")
+    assert action_section is not None
+    assert page.run_button.minimumHeight() >= dimensions.button_min_height
+    assert action_section.minimumHeight() >= page.run_button.sizeHint().height()
     assert page.summary_panel.minimumHeight() == dimensions.inspect_summary_min_height
     assert page.result_image_tabs.minimumHeight() == dimensions.inspect_result_image_tabs_min_height
     assert page.tabs.minimumHeight() == dimensions.inspect_result_tabs_min_height
     assert page.annotated_preview.minimumHeight() == dimensions.inspect_result_preview_min_height
+    assert has_ancestor(page.run_button, QScrollArea) is False
+    assert has_ancestor(page.operation_state_banner, QScrollArea) is False
+    assert has_ancestor(page.summary_panel, QScrollArea, "inspectImageLeftPaneScroll") is True
+    assert has_ancestor(page.config_path_edit, QScrollArea, "inspectImageLeftPaneScroll") is True
+    assert page.findChild(QWidget, "inspectImageLeftPane").maximumWidth() == dimensions.workflow_rail_size_hint_width
+    assert page.workspace.widget(1).sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
+
+
+def test_inspect_image_run_button_is_allocated_full_height_at_desktop_size():
+    app = QApplication.instance() or QApplication([])
+    page = InspectImagePage(AppState())
+    page.resize(1366, 768)
+    page.show()
+    app.processEvents()
+
+    try:
+        assert page.run_button.height() >= page.run_button.minimumHeight()
+        assert page.run_button.height() >= theme_dimensions().button_min_height
+        assert has_ancestor(page.run_button, QScrollArea) is False
+        assert has_ancestor(page.operation_state_banner, QScrollArea) is False
+    finally:
+        page.close()
 
 
 def test_inspect_image_page_operation_state_transitions(tmp_path):
@@ -1646,9 +1845,9 @@ def test_inspect_image_result_completion_keeps_stable_workspace(tmp_path):
     page._on_completed(result, tmp_path)
 
     assert page.layout().indexOf(page.workspace) == workspace_index
-    assert page.workspace.widget(0) is page.findChild(QScrollArea, "inspectImageLeftPaneScroll")
-    assert page.findChild(QScrollArea, "inspectImageLeftPaneScroll").widget() is page.findChild(QWidget, "inspectImageLeftPane")
-    assert page.workspace.widget(1) is not None
+    assert page.workspace.widget(0) is page.findChild(QWidget, "inspectImageLeftPane")
+    assert page.findChild(QScrollArea, "inspectImageLeftPaneScroll").widget() is page.findChild(QWidget, "inspectImageSecondaryPane")
+    assert page.workspace.widget(1).findChild(ResultImageTabs) is page.result_image_tabs
     assert page.summary_panel.result_badge.text() == "OK"
 
 
@@ -1849,9 +2048,10 @@ def test_inspect_camera_page_uses_shared_ui_components():
     assert len(panels) >= 4
     assert {"Camera", "Operation", "Result Summary", "Config and Output"}.issubset(section_titles)
     assert any(panel.property("density") == "compact" for panel in panels)
-    assert page.findChild(QSplitter, "cameraOperatorWorkspace") is not None
+    assert isinstance(page.findChild(QSplitter, "cameraOperatorWorkspace"), WorkbenchLayout)
     assert page.findChild(QScrollArea, "cameraControlPaneScroll") is not None
     assert page.findChild(QWidget, "cameraControlPane") is not None
+    assert page.findChild(QWidget, "cameraSecondaryPane") is not None
     assert isinstance(page.visual_stack, QStackedWidget)
     assert isinstance(page.feedback_label, StatusBanner)
     assert isinstance(page.operation_state_banner, StatusBanner)
@@ -1866,6 +2066,39 @@ def test_inspect_camera_page_uses_shared_ui_components():
     assert page.result_image_tabs.minimumHeight() == dimensions.camera_result_image_tabs_min_height
     assert page.tabs.minimumHeight() == dimensions.camera_result_tabs_min_height
     assert page.annotated_preview.minimumHeight() == dimensions.camera_result_preview_min_height
+    assert page.findChild(QWidget, "cameraControlPane").maximumWidth() == dimensions.workflow_rail_size_hint_width
+    assert has_ancestor(page.start_button, QScrollArea) is False
+    assert has_ancestor(page.stop_button, QScrollArea) is False
+    assert has_ancestor(page.capture_button, QScrollArea) is False
+    assert has_ancestor(page.inspect_button, QScrollArea) is False
+    assert has_ancestor(page.operation_state_banner, QScrollArea) is False
+    assert has_ancestor(page.summary_panel, QScrollArea, "cameraControlPaneScroll") is True
+    assert has_ancestor(page.config_path_edit, QScrollArea, "cameraControlPaneScroll") is True
+    assert page.findChild(QSplitter, "cameraOperatorWorkspace").widget(1).sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
+
+
+def test_inspect_camera_action_buttons_are_allocated_full_height_at_desktop_size():
+    app = QApplication.instance() or QApplication([])
+    page = InspectCameraPage(AppState())
+    page.resize(1366, 768)
+    page.show()
+    app.processEvents()
+
+    try:
+        for button in (
+            page.start_button,
+            page.stop_button,
+            page.capture_button,
+            page.inspect_button,
+            page.retake_button,
+            page.open_output_button,
+        ):
+            assert button.height() >= button.minimumHeight()
+            assert button.height() >= theme_dimensions().button_min_height
+            assert has_ancestor(button, QScrollArea) is False
+        assert has_ancestor(page.operation_state_banner, QScrollArea) is False
+    finally:
+        page.close()
 
 
 def test_inspect_camera_visual_workspace_switches_between_preview_and_results():
@@ -1972,6 +2205,7 @@ def test_inspect_camera_live_frame_updates_visible_preview_widget():
 
     page.visual_stack.setCurrentWidget(page.result_image_tabs)
     page._state = "live_preview"
+    page._camera_lifecycle = "starting"
     page._on_frame_ready(frame)
 
     assert page.visual_stack.currentWidget() is page.preview_container
@@ -1979,6 +2213,133 @@ def test_inspect_camera_live_frame_updates_visible_preview_widget():
     assert page.preview_label._source_pixmap.width() == 20
     assert page.preview_label._source_pixmap.height() == 12
     assert page._latest_frame is frame
+
+
+def test_inspect_camera_stale_session_frame_is_ignored():
+    app = QApplication.instance() or QApplication([])
+    page = InspectCameraPage(AppState())
+    current_frame = np.zeros((12, 20, 3), dtype=np.uint8)
+    current_frame[:, :] = (20, 80, 160)
+    stale_frame = np.zeros((12, 20, 3), dtype=np.uint8)
+    stale_frame[:, :] = (0, 255, 0)
+
+    page._camera_session_id = 2
+    page._camera_lifecycle = "running"
+    page._state = "live_preview"
+    page._on_frame_ready_for_session(2, current_frame)
+    source_before = page.preview_label._source_pixmap
+    latest_before = page._latest_frame
+
+    page._on_frame_ready_for_session(1, stale_frame)
+
+    assert page._latest_frame is latest_before
+    assert page.preview_label._source_pixmap is source_before
+
+
+def test_inspect_camera_stale_finished_does_not_clear_current_session():
+    app = QApplication.instance() or QApplication([])
+    page = InspectCameraPage(AppState())
+    thread_sentinel = object()
+    worker_sentinel = object()
+    page._camera_session_id = 4
+    page._camera_lifecycle = "running"
+    page._camera_thread = thread_sentinel
+    page._camera_worker = worker_sentinel
+    page._state = "live_preview"
+
+    page._on_camera_finished_for_session(3)
+
+    assert page._camera_thread is thread_sentinel
+    assert page._camera_worker is worker_sentinel
+    assert page._camera_lifecycle == "running"
+    assert page._state == "live_preview"
+
+
+def test_inspect_camera_start_is_ignored_while_stopping():
+    app = QApplication.instance() or QApplication([])
+    page = InspectCameraPage(AppState())
+    page._camera_session_id = 5
+    page._camera_lifecycle = "stopping"
+
+    page.start_camera()
+
+    assert page._camera_session_id == 5
+    assert page._camera_thread is None
+    assert page._camera_worker is None
+
+
+def test_inspect_camera_duplicate_start_is_ignored_while_starting():
+    app = QApplication.instance() or QApplication([])
+    page = InspectCameraPage(AppState())
+    thread_sentinel = object()
+    worker_sentinel = object()
+    page._camera_session_id = 7
+    page._camera_lifecycle = "starting"
+    page._camera_thread = thread_sentinel
+    page._camera_worker = worker_sentinel
+
+    page.start_camera()
+
+    assert page._camera_session_id == 7
+    assert page._camera_thread is thread_sentinel
+    assert page._camera_worker is worker_sentinel
+
+
+def test_inspect_camera_stop_transitions_to_stopped(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    page = InspectCameraPage(AppState())
+    calls = []
+    page._camera_session_id = 6
+    page._camera_lifecycle = "running"
+    page._camera_thread = object()
+    page._camera_worker = object()
+    page._state = "live_preview"
+
+    def fake_stop(session_id):
+        calls.append(session_id)
+        page._camera_thread = None
+        page._camera_worker = None
+        return True
+
+    monkeypatch.setattr(page, "_stop_camera_worker", fake_stop)
+
+    page.stop_camera()
+
+    assert calls == [6]
+    assert page._camera_lifecycle == "stopped"
+    assert page._camera_thread is None
+    assert page._camera_worker is None
+    assert page._state == "idle"
+    assert page.start_button.isEnabled() is True
+
+
+def test_inspect_camera_full_page_live_frame_renders_visible_non_black_preview():
+    app = QApplication.instance() or QApplication([])
+    page = InspectCameraPage(AppState())
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    frame[:, :, 1] = 255
+
+    page.resize(1366, 768)
+    page.show()
+    page._state = "live_preview"
+    page._camera_lifecycle = "starting"
+    page._on_frame_ready(frame)
+    app.processEvents()
+    page.resize(1200, 720)
+    app.processEvents()
+
+    image = page.preview_label.grab().toImage()
+    center_color = QColor(image.pixel(image.width() // 2, image.height() // 2))
+
+    assert page.visual_stack.currentWidget() is page.preview_container
+    assert page.preview_label.isVisible()
+    assert page.preview_label._source_pixmap is not None
+    assert not page.preview_label._source_pixmap.isNull()
+    assert center_color.green() > 200
+    assert center_color.red() < 40
+    assert center_color.blue() < 40
+
+    page.close()
 
 
 def test_inspect_camera_live_preview_paints_centered_frame_in_tall_workspace():
@@ -1990,6 +2351,7 @@ def test_inspect_camera_live_preview_paints_centered_frame_in_tall_workspace():
     page.visual_stack.resize(260, 640)
     page.visual_stack.show()
     page._state = "live_preview"
+    page._camera_lifecycle = "starting"
     page._on_frame_ready(frame)
     app.processEvents()
 
@@ -2026,8 +2388,10 @@ def test_inspect_camera_retake_after_error_result_returns_to_preview_visual_work
     assert page.visual_stack.currentWidget() is page.result_image_tabs
 
     page._camera_thread = object()
+    page._camera_lifecycle = "running"
     page.retake()
     page._camera_thread = None
+    page._camera_lifecycle = "stopped"
 
     assert page._state == "live_preview"
     assert page.visual_stack.currentWidget() is page.preview_container

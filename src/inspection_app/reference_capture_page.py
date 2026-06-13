@@ -8,7 +8,7 @@ from typing import Callable
 import cv2
 import numpy as np
 import shiboken6
-from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -122,6 +122,16 @@ def frame_to_pixmap(frame: np.ndarray) -> QPixmap:
     return QPixmap.fromImage(image)
 
 
+def _frame_diagnostics(frame: np.ndarray) -> str:
+    try:
+        return (
+            f"frame shape={frame.shape}; dtype={frame.dtype}; "
+            f"min={frame.min()}; max={frame.max()}; mean={float(frame.mean()):.2f}"
+        )
+    except Exception as exc:
+        return f"frame diagnostics unavailable: {exc}"
+
+
 class CameraWorker(QObject):
     frame_ready = Signal(object)
     actual_resolution = Signal(int, int)
@@ -217,6 +227,10 @@ class AspectImageLabel(QWidget):
         self._logged_first_display = False
         self._image_alignment = image_alignment
         self._preserve_aspect_size = preserve_aspect_size
+        self._deferred_update_pending = False
+        self._deferred_update_timer = QTimer(self)
+        self._deferred_update_timer.setSingleShot(True)
+        self._deferred_update_timer.timeout.connect(self._run_deferred_update)
 
     def refresh_theme(self) -> None:
         self.setStyleSheet(preview_surface_stylesheet())
@@ -230,12 +244,18 @@ class AspectImageLabel(QWidget):
         self._message = ""
         self.updateGeometry()
         self.update()
+        self._defer_update()
 
     def clear_preview(self, message: str = "Camera preview is idle.") -> None:
         self._source_pixmap = None
         self._message = message
         self.updateGeometry()
         self.update()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if self._source_pixmap is not None and not self._source_pixmap.isNull():
+            self.update()
 
     def hasHeightForWidth(self) -> bool:  # type: ignore[override]
         return self._preserve_aspect_size
@@ -257,6 +277,8 @@ class AspectImageLabel(QWidget):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         rect = self.rect()
         painter.fillRect(rect, self.palette().window())
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
         if self._source_pixmap is None or self._source_pixmap.isNull():
             painter.setPen(Qt.GlobalColor.lightGray)
             text = _camera_empty_state_text(self._message)
@@ -281,6 +303,9 @@ class AspectImageLabel(QWidget):
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+        if scaled.isNull():
+            self._defer_update()
+            return
         x = rect.x() + (rect.width() - scaled.width()) // 2
         if self._image_alignment & Qt.AlignmentFlag.AlignTop:
             y = rect.y()
@@ -289,6 +314,16 @@ class AspectImageLabel(QWidget):
         else:
             y = rect.y() + (rect.height() - scaled.height()) // 2
         painter.drawPixmap(x, y, scaled)
+
+    def _defer_update(self) -> None:
+        if self._deferred_update_pending:
+            return
+        self._deferred_update_pending = True
+        self._deferred_update_timer.start(0)
+
+    def _run_deferred_update(self) -> None:
+        self._deferred_update_pending = False
+        self.update()
 
 
 def _camera_empty_state_text(message: str) -> str:
@@ -313,6 +348,8 @@ class ReferenceCapturePage(QWidget):
         self._captured_frame: np.ndarray | None = None
         self._state = "idle"
         self._last_actual_resolution: tuple[int, int] | None = None
+        self._camera_lifecycle = "stopped"
+        self._camera_session_id = 0
 
         self._build_ui()
         self.refresh_from_state()
@@ -459,8 +496,15 @@ class ReferenceCapturePage(QWidget):
                 self._set_feedback(str(exc), ok=False)
 
     def start_camera(self) -> None:
-        if self._thread is not None:
+        if self._camera_lifecycle in {"starting", "running", "stopping"} or self._thread is not None:
+            camera_log(
+                f"reference capture start ignored; lifecycle={self._camera_lifecycle}; "
+                f"session={self._camera_session_id}"
+            )
             return
+        self._camera_session_id += 1
+        session_id = self._camera_session_id
+        self._camera_lifecycle = "starting"
         self._latest_frame = None
         self._captured_frame = None
         self._last_actual_resolution = None
@@ -471,23 +515,35 @@ class ReferenceCapturePage(QWidget):
         self._set_state("live_preview")
         self.preview_label.clear_preview("Starting camera\nWaiting for the first live frame.")
         self._set_feedback("Starting camera...", ok=True)
-        camera_log("start camera clicked; creating camera thread")
+        camera_log(f"start camera clicked; creating camera thread; session={session_id}")
 
         self._thread = QThread(self)
         self._worker = CameraWorker(self.camera_index_spin.value(), self.width_spin.value(), self.height_spin.value())
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
-        self._worker.frame_ready.connect(self._on_frame_ready)
-        self._worker.actual_resolution.connect(self._on_actual_resolution)
-        self._worker.error.connect(self._on_camera_error)
-        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.frame_ready.connect(lambda frame, sid=session_id: self._on_frame_ready_for_session(sid, frame))
+        self._worker.actual_resolution.connect(
+            lambda width, height, sid=session_id: self._on_actual_resolution_for_session(sid, width, height)
+        )
+        self._worker.error.connect(lambda message, sid=session_id: self._on_camera_error_for_session(sid, message))
+        self._worker.finished.connect(lambda sid=session_id: self._on_worker_finished_for_session(sid))
         self._worker.finished.connect(self._thread.quit)
         self._worker.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._thread.deleteLater)
         self._thread.start()
 
     def stop_camera(self) -> None:
-        self._stop_worker()
+        if self._camera_lifecycle in {"stopped", "stopping"} and self._thread is None:
+            return
+        stop_session_id = self._camera_session_id
+        self._camera_lifecycle = "stopping"
+        camera_log(f"reference capture stop requested; session={stop_session_id}")
+        stopped = self._stop_worker(stop_session_id)
+        if not stopped:
+            self._set_feedback("Stopping camera. Waiting for camera worker to finish.", ok=True)
+            self._set_state("live_preview")
+            return
+        self._camera_lifecycle = "stopped"
         self._captured_frame = None
         self._set_state("idle")
         self.preview_label.clear_preview()
@@ -504,6 +560,9 @@ class ReferenceCapturePage(QWidget):
 
     def retake(self) -> None:
         self._captured_frame = None
+        if self._camera_lifecycle == "stopping":
+            self._set_feedback("Camera is stopping. Start again after it has stopped.", ok=False)
+            return
         self._set_state("live_preview")
         self._set_feedback("Live preview resumed.", ok=True)
 
@@ -524,20 +583,46 @@ class ReferenceCapturePage(QWidget):
             self._set_feedback(f"Could not save reference image: {exc}", ok=False)
 
     def shutdown(self) -> None:
-        self._stop_worker()
+        self._camera_lifecycle = "stopping"
+        self._stop_worker(self._camera_session_id)
 
     def _on_frame_ready(self, frame: object) -> None:
+        self._on_frame_ready_for_session(self._camera_session_id, frame)
+
+    def _on_frame_ready_for_session(self, session_id: int, frame: object) -> None:
+        if session_id != self._camera_session_id:
+            camera_log(
+                f"ignored stale reference frame; signal_session={session_id}; "
+                f"current_session={self._camera_session_id}; lifecycle={self._camera_lifecycle}"
+            )
+            return
+        if self._camera_lifecycle not in {"starting", "running"}:
+            camera_log(f"ignored reference frame while lifecycle={self._camera_lifecycle}; session={session_id}")
+            return
         if not isinstance(frame, np.ndarray):
             return
         if not getattr(self, "_logged_first_frame_ready", False):
-            camera_log(f"first _on_frame_ready in UI thread; frame shape={frame.shape}")
+            camera_log(
+                "first _on_frame_ready in UI thread; "
+                f"session={session_id}; lifecycle={self._camera_lifecycle}; {_frame_diagnostics(frame)}"
+            )
             self._logged_first_frame_ready = True
+        self._camera_lifecycle = "running"
         self._latest_frame = frame
         if self._state == "live_preview":
             self.preview_label.set_frame_pixmap(frame_to_pixmap(frame))
             self._update_capture_state_banner(self._state)
 
     def _on_actual_resolution(self, width: int, height: int) -> None:
+        self._on_actual_resolution_for_session(self._camera_session_id, width, height)
+
+    def _on_actual_resolution_for_session(self, session_id: int, width: int, height: int) -> None:
+        if session_id != self._camera_session_id:
+            camera_log(
+                f"ignored stale reference resolution; signal_session={session_id}; "
+                f"current_session={self._camera_session_id}"
+            )
+            return
         self._last_actual_resolution = (width, height)
         requested_width = self.width_spin.value()
         requested_height = self.height_spin.value()
@@ -550,39 +635,60 @@ class ReferenceCapturePage(QWidget):
             self._set_feedback(f"Camera started. Actual frame size is {width}x{height}.", ok=True)
 
     def _on_camera_error(self, message: str) -> None:
+        self._on_camera_error_for_session(self._camera_session_id, message)
+
+    def _on_camera_error_for_session(self, session_id: int, message: str) -> None:
+        if session_id != self._camera_session_id:
+            camera_log(
+                f"ignored stale reference error; signal_session={session_id}; "
+                f"current_session={self._camera_session_id}; message={message}"
+            )
+            return
         camera_log(f"camera error shown to UI: {message}")
+        self._camera_lifecycle = "stopped"
         self._set_feedback(message, ok=False)
         self._set_state("idle")
 
     def _on_worker_finished(self) -> None:
-        camera_log("camera worker finished")
+        self._on_worker_finished_for_session(self._camera_session_id)
+
+    def _on_worker_finished_for_session(self, session_id: int) -> None:
+        if session_id != self._camera_session_id:
+            camera_log(
+                f"ignored stale reference finished; signal_session={session_id}; "
+                f"current_session={self._camera_session_id}; lifecycle={self._camera_lifecycle}"
+            )
+            return
+        camera_log(f"camera worker finished; session={session_id}")
         self._thread = None
         self._worker = None
+        self._camera_lifecycle = "stopped"
         if self._state == "live_preview":
             self._set_state("idle")
 
-    def _stop_worker(self) -> None:
+    def _stop_worker(self, session_id: int | None = None) -> bool:
         worker = self._worker
         thread = self._thread
         if worker is not None:
             try:
                 if shiboken6.isValid(worker):
-                    camera_log("requesting camera worker stop")
+                    camera_log(f"requesting camera worker stop; session={session_id}")
                     worker.stop()
             except RuntimeError:
                 pass
         if thread is not None:
             try:
                 if shiboken6.isValid(thread):
-                    camera_log("requesting camera thread quit")
+                    camera_log(f"requesting camera thread quit; session={session_id}")
                     thread.quit()
                     if not thread.wait(2500):
-                        camera_log("camera thread did not stop within 2500 ms")
-                        return
+                        camera_log(f"camera thread did not stop within 2500 ms; session={session_id}")
+                        return False
             except RuntimeError:
                 pass
         self._thread = None
         self._worker = None
+        return True
 
     def _set_state(self, state: str) -> None:
         self._state = state
@@ -590,10 +696,11 @@ class ReferenceCapturePage(QWidget):
         live = state == "live_preview"
         captured = state == "captured_preview"
         saved = state == "saved"
-        camera_running = self._thread is not None
+        camera_running = self._camera_lifecycle in {"starting", "running", "stopping"} or self._thread is not None
+        camera_stopping = self._camera_lifecycle == "stopping"
         self.start_button.setEnabled((idle or saved) and not camera_running)
-        self.stop_button.setEnabled((live or captured or saved) and camera_running)
-        self.capture_button.setEnabled(live)
+        self.stop_button.setEnabled((live or captured or saved) and camera_running and not camera_stopping)
+        self.capture_button.setEnabled(live and self._camera_lifecycle == "running")
         self.save_button.setEnabled(captured)
         self.retake_button.setEnabled(captured or (saved and camera_running))
         for widget in (self.camera_index_spin, self.width_spin, self.height_spin):

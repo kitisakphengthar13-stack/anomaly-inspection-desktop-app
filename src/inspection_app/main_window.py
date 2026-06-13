@@ -45,14 +45,15 @@ from inspection_app.zone_editor_page import ZoneEditorPage
 class PageSpec:
     title: str
     description: str
+    scroll_policy: str = "page"
 
 
 PAGE_SPECS: tuple[PageSpec, ...] = (
     PageSpec("Project Setup", "Prepare the inspection job and required files."),
     PageSpec("Capture Reference", "Capture the empty station reference."),
     PageSpec("Draw Zones", "Define presence-check regions."),
-    PageSpec("Inspect Image", "Inspect a saved image."),
-    PageSpec("Inspect Camera", "Capture and inspect a camera frame."),
+    PageSpec("Inspect Image", "Inspect a saved image.", scroll_policy="workbench"),
+    PageSpec("Inspect Camera", "Capture and inspect a camera frame.", scroll_policy="workbench"),
     PageSpec("Logs", "Review inspection history and artifacts."),
 )
 
@@ -260,12 +261,17 @@ class MainWindow(QMainWindow):
         self._inspect_image_page = InspectImagePage(self.state, self._set_status_message, self.runtime_manager)
         self._inspect_camera_page = InspectCameraPage(self.state, self._set_status_message, self.runtime_manager)
         self._logs_page = LogsPage(self.state, self._set_status_message)
-        self._stack.addWidget(_scrollable_page(self._project_setup_page))
-        self._stack.addWidget(_scrollable_page(self._reference_capture_page))
-        self._stack.addWidget(_scrollable_page(self._zone_editor_page))
-        self._stack.addWidget(_scrollable_page(self._inspect_image_page))
-        self._stack.addWidget(_scrollable_page(self._inspect_camera_page))
-        self._stack.addWidget(_scrollable_page(self._logs_page))
+        for index, page in enumerate(
+            (
+                self._project_setup_page,
+                self._reference_capture_page,
+                self._zone_editor_page,
+                self._inspect_image_page,
+                self._inspect_camera_page,
+                self._logs_page,
+            )
+        ):
+            self._stack.addWidget(_page_host(page, PAGE_SPECS[index].scroll_policy))
 
         content_layout.addWidget(self._stack)
         return content
@@ -394,3 +400,10 @@ def _scrollable_page(page: QWidget) -> QScrollArea:
     scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
     scroll.setWidget(page)
     return scroll
+
+
+def _page_host(page: QWidget, scroll_policy: str) -> QWidget:
+    if scroll_policy == "workbench":
+        page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        return page
+    return _scrollable_page(page)

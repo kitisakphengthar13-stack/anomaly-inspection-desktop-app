@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSizePolicy,
-    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -32,6 +31,7 @@ from inspection_app.formatting import (
     format_score,
 )
 from inspection_app.job_paths import default_image_output_dir
+from inspection_app.layout_contracts import ActionSection, ControlRail, WorkbenchLayout
 from inspection_app.runtime import PreparedRuntimeManager
 from inspection_app.state import AppState
 from inspection_app.theme import page_margins, theme_dimensions, theme_spacing, zero_margins
@@ -41,7 +41,6 @@ from inspection_app.ui_components import (
     PathPickerRow,
     ResultImageTabs,
     ResultSummaryPanel,
-    ScrollablePane,
     SectionPanel,
     StatusBanner,
     set_button_icon,
@@ -155,30 +154,27 @@ class InspectImagePage(QWidget):
 
         self._main_layout.addWidget(self.workspace, 1)
 
-    def _workspace(self) -> QSplitter:
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setObjectName("inspectImageWorkspace")
-        splitter.setChildrenCollapsible(False)
-        splitter.addWidget(self._left_control_pane_scroll())
-        splitter.addWidget(self._result_images_group())
+    def _workspace(self) -> WorkbenchLayout:
+        splitter = WorkbenchLayout(object_name="inspectImageWorkspace", rail_position="left")
+        splitter.set_control_rail(self._control_rail())
+        splitter.set_main_workspace(self._result_images_group())
         dimensions = theme_dimensions()
-        splitter.setStretchFactor(0, dimensions.inspect_splitter_left_stretch)
-        splitter.setStretchFactor(1, dimensions.inspect_splitter_right_stretch)
         splitter.setSizes([dimensions.inspect_splitter_left_width, dimensions.inspect_splitter_right_width])
         return splitter
 
-    def _left_control_pane_scroll(self) -> ScrollablePane:
-        return ScrollablePane(self._left_control_pane(), object_name="inspectImageLeftPaneScroll")
+    def _control_rail(self) -> ControlRail:
+        rail = ControlRail(object_name="inspectImageLeftPane")
+        rail.add_fixed(self._inputs_group())
+        rail.add_fixed(self._action_group())
+        rail.set_scroll_body(self._secondary_control_pane(), object_name="inspectImageLeftPaneScroll")
+        return rail
 
-    def _left_control_pane(self) -> QWidget:
+    def _secondary_control_pane(self) -> QWidget:
         widget = QWidget()
-        widget.setObjectName("inspectImageLeftPane")
+        widget.setObjectName("inspectImageSecondaryPane")
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(*zero_margins())
         layout.setSpacing(theme_spacing().left_pane_gap)
-        self.inputs_panel = self._inputs_group()
-        layout.addWidget(self.inputs_panel)
-        layout.addWidget(self._action_group())
         layout.addWidget(self._summary_group())
         layout.addWidget(self._setup_output_group())
         layout.addStretch(1)
@@ -186,6 +182,7 @@ class InspectImagePage(QWidget):
 
     def _inputs_group(self) -> SectionPanel:
         panel = SectionPanel("Input Image", compact=True)
+        self.inputs_panel = panel
         grid = QGridLayout()
         spacing = theme_spacing()
         grid.setContentsMargins(*zero_margins())
@@ -209,7 +206,9 @@ class InspectImagePage(QWidget):
         self.run_button = set_button_role(QPushButton("Run Inspection"), "primary")
         set_button_icon(self.run_button, "run")
         self.run_button.clicked.connect(self.run_inspection)
-        panel.content_layout.addWidget(ActionButtonRow((self.run_button,), align_right=True))
+        action_section = ActionSection(rows=1)
+        action_section.add_row((self.run_button,), align_right=True)
+        panel.content_layout.addWidget(action_section)
         panel.content_layout.addWidget(self.feedback_label)
         return panel
 
