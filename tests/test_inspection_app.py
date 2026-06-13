@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import yaml
 import inspection_app.runtime as runtime_module
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -45,6 +45,7 @@ from inspection_app.inspect_camera_page import (
     default_camera_output_dir,
     save_captured_inspection_frame,
 )
+from inspection_app.camera_controller import CameraController, CameraControllerState, CameraStartupPolicy
 from inspection_app.main_window import MainWindow
 from inspection_app.inspect_image_page import (
     InspectionWorker,
@@ -80,6 +81,7 @@ from inspection_app.logs_page import (
 from inspection_app.project_setup_page import ProjectSetupPage
 from inspection_app.reference_capture_page import (
     AspectImageLabel,
+    CameraWorker,
     ReferenceCapturePage,
     camera_backend_candidates,
     default_reference_output_path,
@@ -1168,6 +1170,22 @@ class FakeCapture:
         self.released = True
 
 
+class SequenceCapture(FakeCapture):
+    def __init__(self, frames: list[np.ndarray], opened: bool = True, backend_name: str = "FAKE") -> None:
+        super().__init__(opened, backend_name)
+        self.frames = list(frames)
+        self.set_calls = []
+
+    def read(self):
+        if not self.frames:
+            return False, None
+        return True, self.frames.pop(0)
+
+    def set(self, prop, value):
+        self.set_calls.append((prop, value))
+        return True
+
+
 def test_open_camera_capture_tries_windows_fallback_until_open():
     calls = []
     captures = [FakeCapture(False, "DSHOW"), FakeCapture(True, "MSMF")]
@@ -1196,6 +1214,319 @@ def test_open_camera_capture_reports_clear_error_when_all_backends_fail():
         assert "Unable to open camera index 0 using DSHOW or MSMF" in str(exc)
     else:
         raise AssertionError("Expected open failure to raise a clear RuntimeError.")
+
+
+def test_camera_worker_emits_session_payload_after_valid_startup_frame():
+    blank = np.zeros((12, 20, 3), dtype=np.uint8)
+    valid = np.full((12, 20, 3), 128, dtype=np.uint8)
+    capture = SequenceCapture([blank, valid])
+
+    def factory(index, backend=None):
+        return capture
+
+    worker = CameraWorker(0, capture_factory=factory, session_id=42)
+    frames = []
+    resolutions = []
+    errors = []
+    statuses = []
+    finished = []
+    worker.frame_ready.connect(lambda session_id, frame: frames.append((session_id, frame.copy())))
+    worker.actual_resolution.connect(lambda session_id, width, height: resolutions.append((session_id, width, height)))
+    worker.status.connect(lambda session_id, message, level: statuses.append((session_id, message, level)))
+    worker.error.connect(lambda session_id, message: errors.append((session_id, message)))
+    worker.finished.connect(lambda session_id: finished.append(session_id))
+
+    worker.run()
+
+    assert [(session_id, frame.shape) for session_id, frame in frames] == [(42, valid.shape)]
+    assert resolutions == [(42, 20, 12)]
+    assert statuses == [(42, "Warming up camera...", "info")]
+    assert errors == [(42, "Could not read camera frame.")]
+    assert finished == [42]
+    assert capture.released is True
+
+
+def test_camera_worker_recovers_blank_startup_by_reopening_same_backend():
+    blank = np.zeros((12, 20, 3), dtype=np.uint8)
+    valid = np.full((12, 20, 3), 128, dtype=np.uint8)
+    captures = [
+        SequenceCapture([blank, blank, blank], backend_name="DSHOW"),
+        SequenceCapture([valid], backend_name="DSHOW"),
+    ]
+    calls = []
+
+    def factory(index, backend=None):
+        calls.append((index, backend))
+        return captures[len(calls) - 1]
+
+    worker = CameraWorker(
+        0,
+        capture_factory=factory,
+        session_id=7,
+        blank_recovery_frames=3,
+        blank_final_fail_frames=3,
+    )
+    frames = []
+    statuses = []
+    errors = []
+    finished = []
+    worker.frame_ready.connect(lambda session_id, frame: frames.append((session_id, frame.copy())))
+    worker.status.connect(lambda session_id, message, level: statuses.append((session_id, message, level)))
+    worker.error.connect(lambda session_id, message: errors.append((session_id, message)))
+    worker.finished.connect(lambda session_id: finished.append(session_id))
+
+    worker.run()
+
+    assert [(session_id, frame.shape) for session_id, frame in frames] == [(7, valid.shape)]
+    assert errors == [(7, "Could not read camera frame.")]
+    assert finished == [7]
+    assert (7, "Blank startup frames detected; reopening camera...", "warning") in statuses
+    assert len(calls) == 2
+    assert calls[0][1] == calls[1][1]
+    assert captures[0].released is True
+    assert captures[1].released is True
+
+
+def test_camera_worker_reports_error_after_blank_recovery_fails():
+    blank = np.zeros((12, 20, 3), dtype=np.uint8)
+    captures = [
+        SequenceCapture([blank, blank], backend_name="DSHOW"),
+        SequenceCapture([blank, blank], backend_name="DSHOW"),
+    ]
+    calls = []
+
+    def factory(index, backend=None):
+        calls.append((index, backend))
+        return captures[len(calls) - 1]
+
+    worker = CameraWorker(
+        0,
+        capture_factory=factory,
+        session_id=9,
+        blank_recovery_frames=2,
+        blank_final_fail_frames=2,
+    )
+    frames = []
+    errors = []
+    finished = []
+    worker.frame_ready.connect(lambda session_id, frame: frames.append((session_id, frame.copy())))
+    worker.error.connect(lambda session_id, message: errors.append((session_id, message)))
+    worker.finished.connect(lambda session_id: finished.append(session_id))
+
+    worker.run()
+
+    assert frames == []
+    assert errors == [
+        (
+            9,
+            "Camera opened but frames stayed blank. "
+            "Please retry or check exposure, lens, privacy shutter, or driver.",
+        )
+    ]
+    assert finished == [9]
+    assert len(calls) == 2
+    assert all(capture.released for capture in captures)
+
+
+def test_camera_worker_stop_during_blank_warmup_cancels_cleanly():
+    blank = np.zeros((12, 20, 3), dtype=np.uint8)
+    capture = SequenceCapture([blank, blank, blank], backend_name="DSHOW")
+
+    def factory(index, backend=None):
+        return capture
+
+    worker = CameraWorker(0, capture_factory=factory, session_id=11, blank_recovery_frames=3)
+    frames = []
+    errors = []
+    finished = []
+    worker.frame_ready.connect(lambda session_id, frame: frames.append((session_id, frame.copy())))
+    worker.status.connect(lambda session_id, message, level: worker.stop())
+    worker.error.connect(lambda session_id, message: errors.append((session_id, message)))
+    worker.finished.connect(lambda session_id: finished.append(session_id))
+
+    worker.run()
+
+    assert frames == []
+    assert errors == []
+    assert finished == [11]
+    assert capture.released is True
+
+
+class FakeControllerWorker(QObject):
+    frame_ready = Signal(int, object)
+    actual_resolution = Signal(int, int, int)
+    status = Signal(int, str, str)
+    error = Signal(int, str)
+    finished = Signal(int)
+
+    instances: list["FakeControllerWorker"] = []
+
+    def __init__(self, camera_index=0, width=0, height=0, *, session_id=0, **kwargs):
+        super().__init__()
+        self.camera_index = camera_index
+        self.width = width
+        self.height = height
+        self.session_id = session_id
+        self.kwargs = kwargs
+        self.stop_count = 0
+        FakeControllerWorker.instances.append(self)
+
+    @Slot()
+    def run(self):
+        return
+
+    @Slot()
+    def stop(self):
+        self.stop_count += 1
+        self.finished.emit(self.session_id)
+
+
+def process_qt_events(app: QApplication, iterations: int = 3) -> None:
+    for _ in range(iterations):
+        app.processEvents()
+
+
+def make_camera_controller(app: QApplication) -> CameraController:
+    FakeControllerWorker.instances.clear()
+    controller = CameraController(
+        lambda: (0, 0, 0),
+        startup_policy=CameraStartupPolicy(idle_release_timeout_ms=10),
+        worker_factory=FakeControllerWorker,
+    )
+    return controller
+
+
+def test_camera_controller_start_creates_one_worker_and_coalesces_repeated_start():
+    app = QApplication.instance() or QApplication([])
+    controller = make_camera_controller(app)
+
+    controller.start_preview()
+    process_qt_events(app)
+    controller.start_preview()
+
+    assert len(FakeControllerWorker.instances) == 1
+    assert controller.state() == CameraControllerState.OPENING.value
+    assert FakeControllerWorker.instances[0].kwargs["blank_max_value"] == 2
+    assert FakeControllerWorker.instances[0].kwargs["blank_mean_max"] == 1.0
+
+    controller.shutdown()
+    process_qt_events(app)
+
+
+def test_camera_controller_soft_stop_resume_does_not_reopen_worker():
+    app = QApplication.instance() or QApplication([])
+    controller = make_camera_controller(app)
+    frames = []
+    controller.frame_ready.connect(frames.append)
+    frame = np.full((12, 20, 3), 128, dtype=np.uint8)
+
+    controller.start_preview()
+    process_qt_events(app)
+    session_id = controller.session_id()
+    controller._on_worker_frame_ready(session_id, frame)
+    controller.stop_preview()
+    controller.start_preview()
+
+    assert controller.state() == CameraControllerState.RUNNING.value
+    assert len(FakeControllerWorker.instances) == 1
+    assert len(frames) == 1
+
+    controller.shutdown()
+    process_qt_events(app)
+
+
+def test_camera_controller_idle_release_hard_stops_worker():
+    app = QApplication.instance() or QApplication([])
+    controller = make_camera_controller(app)
+    frame = np.full((12, 20, 3), 128, dtype=np.uint8)
+
+    controller.start_preview()
+    process_qt_events(app)
+    worker = FakeControllerWorker.instances[-1]
+    controller._on_worker_frame_ready(controller.session_id(), frame)
+    controller.stop_preview()
+    controller._release_idle_worker()
+    process_qt_events(app)
+
+    assert worker.stop_count == 1
+    assert controller.state() == CameraControllerState.RELEASED.value
+    assert controller.has_active_worker() is False
+
+
+def test_camera_controller_stop_during_opening_cancels_worker():
+    app = QApplication.instance() or QApplication([])
+    controller = make_camera_controller(app)
+
+    controller.start_preview()
+    process_qt_events(app)
+    worker = FakeControllerWorker.instances[-1]
+    controller.stop_preview()
+    process_qt_events(app)
+
+    assert worker.stop_count == 1
+    assert controller.state() == CameraControllerState.RELEASED.value
+    assert controller.has_active_worker() is False
+
+
+def test_camera_controller_start_while_warming_does_not_duplicate_worker():
+    app = QApplication.instance() or QApplication([])
+    controller = make_camera_controller(app)
+
+    controller.start_preview()
+    process_qt_events(app)
+    controller._on_worker_status(controller.session_id(), "Warming up camera...", "info")
+    controller.start_preview()
+
+    assert controller.state() == CameraControllerState.WARMING.value
+    assert len(FakeControllerWorker.instances) == 1
+
+    controller.shutdown()
+    process_qt_events(app)
+
+
+def test_camera_controller_ignores_frames_while_soft_stopped_and_stale_frames():
+    app = QApplication.instance() or QApplication([])
+    controller = make_camera_controller(app)
+    frames = []
+    controller.frame_ready.connect(frames.append)
+    frame = np.full((12, 20, 3), 128, dtype=np.uint8)
+    stale_frame = np.full((12, 20, 3), 32, dtype=np.uint8)
+
+    controller.start_preview()
+    process_qt_events(app)
+    session_id = controller.session_id()
+    controller._on_worker_frame_ready(session_id, frame)
+    controller._on_worker_frame_ready(session_id - 1, stale_frame)
+    controller.stop_preview()
+    controller._on_worker_frame_ready(session_id, frame)
+
+    assert len(frames) == 1
+    assert frames[0] is frame
+
+    controller.shutdown()
+    process_qt_events(app)
+
+
+def test_camera_controller_error_and_finished_route_by_session():
+    app = QApplication.instance() or QApplication([])
+    controller = make_camera_controller(app)
+    errors = []
+    stopped = []
+    controller.error.connect(errors.append)
+    controller.stopped.connect(lambda: stopped.append(True))
+
+    controller.start_preview()
+    process_qt_events(app)
+    session_id = controller.session_id()
+    controller._on_worker_error(session_id - 1, "stale error")
+    controller._on_worker_finished(session_id - 1)
+    controller._on_worker_error(session_id, "current error")
+    controller._on_worker_finished(session_id)
+
+    assert errors == ["current error"]
+    assert stopped == [True]
+    assert controller.state() == CameraControllerState.FAILED.value
+    assert controller.has_active_worker() is False
 
 
 def test_normalize_reference_output_path_appends_png_extension():
@@ -1401,6 +1732,41 @@ def test_reference_capture_stale_session_frame_is_ignored():
 
     assert page._latest_frame is latest_before
     assert page.preview_label._source_pixmap is source_before
+
+
+def test_reference_capture_blank_startup_frame_is_ignored():
+    app = QApplication.instance() or QApplication([])
+    page = ReferenceCapturePage(AppState())
+    blank_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    page._camera_session_id = 3
+    page._camera_lifecycle = "starting"
+    page._state = "live_preview"
+    page._on_frame_ready_for_session(3, blank_frame)
+
+    assert page._camera_lifecycle == "starting"
+    assert page._latest_frame is None
+    assert page.preview_label._source_pixmap is None
+    assert page.capture_button.isEnabled() is False
+    assert "Warming up camera:" in page.capture_state_banner.text()
+
+
+def test_reference_capture_valid_frame_after_blank_startup_enables_capture():
+    app = QApplication.instance() or QApplication([])
+    page = ReferenceCapturePage(AppState())
+    blank_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    valid_frame = np.full((720, 1280, 3), 80, dtype=np.uint8)
+
+    page._camera_session_id = 4
+    page._camera_lifecycle = "starting"
+    page._state = "live_preview"
+    page._on_frame_ready_for_session(4, blank_frame)
+    page._on_frame_ready_for_session(4, valid_frame)
+
+    assert page._camera_lifecycle == "running"
+    assert page._latest_frame is valid_frame
+    assert page.preview_label._source_pixmap is not None
+    assert page.capture_button.isEnabled() is True
 
 
 def test_default_zones_output_path_uses_app_state():
@@ -2205,8 +2571,7 @@ def test_inspect_camera_live_frame_updates_visible_preview_widget():
 
     page.visual_stack.setCurrentWidget(page.result_image_tabs)
     page._state = "live_preview"
-    page._camera_lifecycle = "starting"
-    page._on_frame_ready(frame)
+    page._on_controller_frame_ready(frame)
 
     assert page.visual_stack.currentWidget() is page.preview_container
     assert page.preview_label._source_pixmap is not None
@@ -2215,102 +2580,90 @@ def test_inspect_camera_live_frame_updates_visible_preview_widget():
     assert page._latest_frame is frame
 
 
-def test_inspect_camera_stale_session_frame_is_ignored():
-    app = QApplication.instance() or QApplication([])
-    page = InspectCameraPage(AppState())
-    current_frame = np.zeros((12, 20, 3), dtype=np.uint8)
-    current_frame[:, :] = (20, 80, 160)
-    stale_frame = np.zeros((12, 20, 3), dtype=np.uint8)
-    stale_frame[:, :] = (0, 255, 0)
-
-    page._camera_session_id = 2
-    page._camera_lifecycle = "running"
-    page._state = "live_preview"
-    page._on_frame_ready_for_session(2, current_frame)
-    source_before = page.preview_label._source_pixmap
-    latest_before = page._latest_frame
-
-    page._on_frame_ready_for_session(1, stale_frame)
-
-    assert page._latest_frame is latest_before
-    assert page.preview_label._source_pixmap is source_before
-
-
-def test_inspect_camera_stale_finished_does_not_clear_current_session():
-    app = QApplication.instance() or QApplication([])
-    page = InspectCameraPage(AppState())
-    thread_sentinel = object()
-    worker_sentinel = object()
-    page._camera_session_id = 4
-    page._camera_lifecycle = "running"
-    page._camera_thread = thread_sentinel
-    page._camera_worker = worker_sentinel
-    page._state = "live_preview"
-
-    page._on_camera_finished_for_session(3)
-
-    assert page._camera_thread is thread_sentinel
-    assert page._camera_worker is worker_sentinel
-    assert page._camera_lifecycle == "running"
-    assert page._state == "live_preview"
-
-
-def test_inspect_camera_start_is_ignored_while_stopping():
-    app = QApplication.instance() or QApplication([])
-    page = InspectCameraPage(AppState())
-    page._camera_session_id = 5
-    page._camera_lifecycle = "stopping"
-
-    page.start_camera()
-
-    assert page._camera_session_id == 5
-    assert page._camera_thread is None
-    assert page._camera_worker is None
-
-
-def test_inspect_camera_duplicate_start_is_ignored_while_starting():
-    app = QApplication.instance() or QApplication([])
-    page = InspectCameraPage(AppState())
-    thread_sentinel = object()
-    worker_sentinel = object()
-    page._camera_session_id = 7
-    page._camera_lifecycle = "starting"
-    page._camera_thread = thread_sentinel
-    page._camera_worker = worker_sentinel
-
-    page.start_camera()
-
-    assert page._camera_session_id == 7
-    assert page._camera_thread is thread_sentinel
-    assert page._camera_worker is worker_sentinel
-
-
-def test_inspect_camera_stop_transitions_to_stopped(monkeypatch):
+def test_inspect_camera_start_button_calls_camera_controller(monkeypatch):
     app = QApplication.instance() or QApplication([])
     page = InspectCameraPage(AppState())
     calls = []
-    page._camera_session_id = 6
-    page._camera_lifecycle = "running"
-    page._camera_thread = object()
-    page._camera_worker = object()
+
+    monkeypatch.setattr(page.camera_controller, "start_preview", lambda: calls.append("start"))
+
+    page.start_camera()
+
+    assert calls == ["start"]
+    assert page._latest_frame is None
+    assert page.visual_stack.currentWidget() is page.preview_container
+
+
+def test_inspect_camera_stop_button_calls_camera_controller(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    page = InspectCameraPage(AppState())
+    calls = []
     page._state = "live_preview"
-
-    def fake_stop(session_id):
-        calls.append(session_id)
-        page._camera_thread = None
-        page._camera_worker = None
-        return True
-
-    monkeypatch.setattr(page, "_stop_camera_worker", fake_stop)
+    page._latest_frame = np.full((12, 20, 3), 80, dtype=np.uint8)
+    monkeypatch.setattr(page.camera_controller, "stop_preview", lambda: calls.append("stop"))
 
     page.stop_camera()
 
-    assert calls == [6]
-    assert page._camera_lifecycle == "stopped"
-    assert page._camera_thread is None
-    assert page._camera_worker is None
+    assert calls == ["stop"]
+    assert page._state == "idle"
+    assert page._latest_frame is None
+    assert page.preview_label._source_pixmap is None
+
+
+def test_inspect_camera_capture_stays_disabled_until_controller_valid_frame():
+    app = QApplication.instance() or QApplication([])
+    page = InspectCameraPage(AppState())
+    valid_frame = np.full((720, 1280, 3), 80, dtype=np.uint8)
+
+    page._on_camera_controller_state_changed(CameraControllerState.WARMING.value, "Warming up camera...", "info")
+    assert page.capture_button.isEnabled() is False
+
+    page.camera_controller._set_state(CameraControllerState.RUNNING, "Camera live.", "success")
+    page._on_controller_frame_ready(valid_frame)
+
+    assert page._latest_frame is valid_frame
+    assert page.preview_label._source_pixmap is not None
+    assert page.capture_button.isEnabled() is True
+
+
+def test_inspect_camera_controller_warning_updates_operation_feedback():
+    app = QApplication.instance() or QApplication([])
+    page = InspectCameraPage(AppState())
+
+    page._on_camera_controller_state_changed(
+        CameraControllerState.RECOVERING.value,
+        "Blank startup frames detected; reopening camera...",
+        "warning",
+    )
+
+    assert page._latest_frame is None
+    assert page.capture_button.isEnabled() is False
+    assert "reopening camera" in page.feedback_label.text()
+    assert page.operation_state_banner.property("level") == "warning"
+
+
+def test_inspect_camera_controller_error_returns_to_idle_and_enables_start():
+    app = QApplication.instance() or QApplication([])
+    page = InspectCameraPage(AppState())
+    page._state = "live_preview"
+
+    page._on_controller_error(
+        "Camera opened but frames stayed blank. Please retry or check exposure, lens, privacy shutter, or driver.",
+    )
+
     assert page._state == "idle"
     assert page.start_button.isEnabled() is True
+    assert "frames stayed blank" in page.feedback_label.text()
+
+
+def test_inspect_camera_controller_stopped_does_not_clear_non_preview_state():
+    app = QApplication.instance() or QApplication([])
+    page = InspectCameraPage(AppState())
+    page._set_state("captured_preview")
+
+    page._on_controller_stopped()
+
+    assert page._state == "captured_preview"
 
 
 def test_inspect_camera_full_page_live_frame_renders_visible_non_black_preview():
@@ -2322,8 +2675,7 @@ def test_inspect_camera_full_page_live_frame_renders_visible_non_black_preview()
     page.resize(1366, 768)
     page.show()
     page._state = "live_preview"
-    page._camera_lifecycle = "starting"
-    page._on_frame_ready(frame)
+    page._on_controller_frame_ready(frame)
     app.processEvents()
     page.resize(1200, 720)
     app.processEvents()
@@ -2351,8 +2703,7 @@ def test_inspect_camera_live_preview_paints_centered_frame_in_tall_workspace():
     page.visual_stack.resize(260, 640)
     page.visual_stack.show()
     page._state = "live_preview"
-    page._camera_lifecycle = "starting"
-    page._on_frame_ready(frame)
+    page._on_controller_frame_ready(frame)
     app.processEvents()
 
     image = page.preview_label.grab().toImage()
@@ -2387,11 +2738,8 @@ def test_inspect_camera_retake_after_error_result_returns_to_preview_visual_work
     page._set_state("result_ready")
     assert page.visual_stack.currentWidget() is page.result_image_tabs
 
-    page._camera_thread = object()
-    page._camera_lifecycle = "running"
+    page.camera_controller._set_state(CameraControllerState.RUNNING, "Camera live.", "success")
     page.retake()
-    page._camera_thread = None
-    page._camera_lifecycle = "stopped"
 
     assert page._state == "live_preview"
     assert page.visual_stack.currentWidget() is page.preview_container
@@ -2469,7 +2817,7 @@ def test_inspect_camera_shutdown_is_safe_when_no_workers_exist():
     page.shutdown()
     page.shutdown()
 
-    assert page._camera_thread is None
+    assert page.camera_controller.has_active_worker() is False
     assert page._inspection_thread is None
 
 

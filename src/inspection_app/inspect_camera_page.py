@@ -7,7 +7,7 @@ from typing import Callable
 import cv2
 import numpy as np
 import shiboken6
-from PySide6.QtCore import QThread, Qt, QTimer, QUrl
+from PySide6.QtCore import QThread, Qt, QTimer, QUrl, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -39,7 +39,13 @@ from inspection_app.inspect_image_page import (
 )
 from inspection_app.job_paths import default_camera_output_dir as job_camera_output_dir
 from inspection_app.layout_contracts import ActionSection, ControlRail, WorkbenchLayout
-from inspection_app.reference_capture_page import AspectImageLabel, CameraWorker, camera_log, frame_to_pixmap
+from inspection_app.camera_controller import CameraController, CameraControllerState
+from inspection_app.reference_capture_page import (
+    AspectImageLabel,
+    camera_log,
+    frame_to_pixmap,
+    log_if_not_gui_thread,
+)
 from inspection_app.runtime import PreparedRuntimeManager
 from inspection_app.state import AppState
 from inspection_app.theme import page_margins, theme_dimensions, theme_spacing, zero_margins
@@ -77,16 +83,6 @@ def save_captured_inspection_frame(frame: np.ndarray | None, output_dir: str | P
     return path, (width, height)
 
 
-def _frame_diagnostics(frame: np.ndarray) -> str:
-    try:
-        return (
-            f"frame shape={frame.shape}; dtype={frame.dtype}; "
-            f"min={frame.min()}; max={frame.max()}; mean={float(frame.mean()):.2f}"
-        )
-    except Exception as exc:
-        return f"frame diagnostics unavailable: {exc}"
-
-
 class _CenteredPreviewContainer(QWidget):
     def __init__(self, preview_label: AspectImageLabel) -> None:
         super().__init__()
@@ -105,6 +101,8 @@ class _CenteredPreviewContainer(QWidget):
         self.update_preview_geometry()
 
     def update_preview_geometry(self) -> None:
+        if not log_if_not_gui_thread("_CenteredPreviewContainer.update_preview_geometry"):
+            return
         rect = self.contentsRect()
         if rect.width() <= 0 or rect.height() <= 0:
             self._defer_preview_geometry_update()
@@ -125,12 +123,16 @@ class _CenteredPreviewContainer(QWidget):
         self.preview_label.update()
 
     def _defer_preview_geometry_update(self) -> None:
+        if not log_if_not_gui_thread("_CenteredPreviewContainer._defer_preview_geometry_update"):
+            return
         if self._deferred_geometry_update_pending:
             return
         self._deferred_geometry_update_pending = True
         self._deferred_geometry_update_timer.start(0)
 
     def _run_deferred_preview_geometry_update(self) -> None:
+        if not log_if_not_gui_thread("_CenteredPreviewContainer._run_deferred_preview_geometry_update"):
+            return
         self._deferred_geometry_update_pending = False
         self.update_preview_geometry()
 
@@ -152,20 +154,21 @@ class InspectCameraPage(QWidget):
         self.state = state
         self._status_callback = status_callback
         self.runtime_manager = runtime_manager
-        self._camera_thread: QThread | None = None
-        self._camera_worker: CameraWorker | None = None
         self._inspection_thread: QThread | None = None
         self._inspection_worker: InspectionWorker | None = None
         self._latest_frame: np.ndarray | None = None
         self._captured_frame: np.ndarray | None = None
         self._captured_image_path: Path | None = None
         self._state = "idle"
-        self._camera_lifecycle = "stopped"
-        self._camera_session_id = 0
-        self._logged_first_frame_ready = False
         self._logged_first_preview_update = False
 
         self._build_ui()
+        self.camera_controller = CameraController(self._camera_settings)
+        self.camera_controller.state_changed.connect(self._on_camera_controller_state_changed, Qt.ConnectionType.QueuedConnection)
+        self.camera_controller.frame_ready.connect(self._on_controller_frame_ready, Qt.ConnectionType.QueuedConnection)
+        self.camera_controller.resolution_changed.connect(self._on_controller_resolution_changed, Qt.ConnectionType.QueuedConnection)
+        self.camera_controller.error.connect(self._on_controller_error, Qt.ConnectionType.QueuedConnection)
+        self.camera_controller.stopped.connect(self._on_controller_stopped, Qt.ConnectionType.QueuedConnection)
         apply_app_locale(self)
         self.refresh_from_state()
         self._set_state("idle")
@@ -348,61 +351,24 @@ class InspectCameraPage(QWidget):
         self.preview_label.refresh_theme()
 
     def start_camera(self) -> None:
-        if self._camera_lifecycle in {"starting", "running", "stopping"} or self._camera_thread is not None:
-            camera_log(
-                f"inspect camera start ignored; lifecycle={self._camera_lifecycle}; "
-                f"session={self._camera_session_id}"
-            )
-            return
-        self._camera_session_id += 1
-        session_id = self._camera_session_id
-        self._camera_lifecycle = "starting"
         self._latest_frame = None
         self._captured_frame = None
         self._captured_image_path = None
         setattr(frame_to_pixmap, "_logged_first", False)
-        self._logged_first_frame_ready = False
         self._logged_first_preview_update = False
         self.preview_label._logged_first_display = False
         self.preview_label._logged_first_source_set = False
         self.preview_label.clear_preview("Starting camera\nWaiting for the first live frame.")
         self._set_state("live_preview")
         self._set_feedback("Starting camera...", ok=True)
-        camera_log(f"inspect camera start requested; session={session_id}; visual workspace set to preview")
-
-        self._camera_thread = QThread(self)
-        self._camera_worker = CameraWorker(self.camera_index_spin.value(), self.width_spin.value(), self.height_spin.value())
-        self._camera_worker.moveToThread(self._camera_thread)
-        self._camera_thread.started.connect(self._camera_worker.run)
-        self._camera_worker.frame_ready.connect(
-            lambda frame, sid=session_id: self._on_frame_ready_for_session(sid, frame)
-        )
-        self._camera_worker.actual_resolution.connect(
-            lambda width, height, sid=session_id: self._on_actual_resolution_for_session(sid, width, height)
-        )
-        self._camera_worker.error.connect(lambda message, sid=session_id: self._on_camera_error_for_session(sid, message))
-        self._camera_worker.finished.connect(lambda sid=session_id: self._on_camera_finished_for_session(sid))
-        self._camera_worker.finished.connect(self._camera_thread.quit)
-        self._camera_worker.finished.connect(self._camera_worker.deleteLater)
-        self._camera_thread.finished.connect(self._camera_thread.deleteLater)
-        self._camera_thread.start()
+        self.camera_controller.start_preview()
 
     def stop_camera(self) -> None:
-        if self._camera_lifecycle in {"stopped", "stopping"} and self._camera_thread is None:
-            return
-        stop_session_id = self._camera_session_id
-        self._camera_lifecycle = "stopping"
-        camera_log(f"inspect camera stop requested; session={stop_session_id}")
-        stopped = self._stop_camera_worker(stop_session_id)
-        if not stopped:
-            self._set_feedback("Stopping camera. Waiting for camera worker to finish.", ok=True)
-            self._set_state("live_preview")
-            return
-        self._camera_lifecycle = "stopped"
         self._latest_frame = None
         self._captured_frame = None
+        self.camera_controller.stop_preview()
         self._set_state("idle")
-        self.preview_label.clear_preview()
+        self.preview_label.clear_preview("Camera preview stopped.\nStart camera to resume.")
         self._set_feedback("Camera stopped.", ok=True)
 
     def capture_part(self) -> None:
@@ -417,9 +383,14 @@ class InspectCameraPage(QWidget):
     def retake(self) -> None:
         self._captured_frame = None
         self._captured_image_path = None
-        if self._camera_lifecycle == "stopped" and self._camera_thread is None:
+        if self.camera_controller.state() in {CameraControllerState.RELEASED.value, CameraControllerState.FAILED.value, CameraControllerState.SOFT_STOPPED.value}:
             self.start_camera()
-        elif self._camera_lifecycle in {"starting", "running"}:
+        elif self.camera_controller.state() in {
+            CameraControllerState.OPENING.value,
+            CameraControllerState.WARMING.value,
+            CameraControllerState.RUNNING.value,
+            CameraControllerState.RECOVERING.value,
+        }:
             self._set_state("live_preview")
             self._set_feedback("Retaking. Live preview resumed.", ok=True)
         else:
@@ -473,8 +444,7 @@ class InspectCameraPage(QWidget):
             self._set_feedback(f"Output folder does not exist yet: {output_dir}", ok=False)
 
     def shutdown(self) -> None:
-        self._camera_lifecycle = "stopping"
-        self._stop_camera_worker(self._camera_session_id)
+        self.camera_controller.shutdown()
         self._stop_inspection_worker()
 
     def _choose_output_dir(self) -> None:
@@ -491,50 +461,24 @@ class InspectCameraPage(QWidget):
         self.state.camera_output_dir = Path(text) if text else None
         self._set_state(self._state)
 
-    def _on_frame_ready(self, frame: object) -> None:
-        self._on_frame_ready_for_session(self._camera_session_id, frame)
+    def _camera_settings(self) -> tuple[int, int, int]:
+        return self.camera_index_spin.value(), self.width_spin.value(), self.height_spin.value()
 
-    def _on_frame_ready_for_session(self, session_id: int, frame: object) -> None:
-        if session_id != self._camera_session_id:
-            camera_log(
-                f"ignored stale inspect-camera frame; signal_session={session_id}; "
-                f"current_session={self._camera_session_id}; lifecycle={self._camera_lifecycle}"
-            )
-            return
-        if self._camera_lifecycle not in {"starting", "running"}:
-            camera_log(
-                f"ignored inspect-camera frame while lifecycle={self._camera_lifecycle}; session={session_id}"
-            )
-            return
+    @Slot(object)
+    def _on_controller_frame_ready(self, frame: object) -> None:
         if not isinstance(frame, np.ndarray):
             return
-        if not self._logged_first_frame_ready:
-            active = self.visual_stack.currentWidget() is self.preview_container if hasattr(self, "visual_stack") else False
-            camera_log(
-                "first inspect-camera frame in UI thread; "
-                f"session={session_id}; state={self._state}; lifecycle={self._camera_lifecycle}; "
-                f"preview_active={active}; {_frame_diagnostics(frame)}"
-            )
-            self._logged_first_frame_ready = True
-        self._camera_lifecycle = "running"
         self._latest_frame = frame
-        if self._state == "live_preview":
-            self._show_camera_visual()
+        if self._state == "result_ready":
             self._set_preview_frame(frame)
-            self._update_operation_state_banner(self._state)
-        elif self._state == "result_ready":
-            self._set_preview_frame(frame)
-
-    def _on_actual_resolution(self, width: int, height: int) -> None:
-        self._on_actual_resolution_for_session(self._camera_session_id, width, height)
-
-    def _on_actual_resolution_for_session(self, session_id: int, width: int, height: int) -> None:
-        if session_id != self._camera_session_id:
-            camera_log(
-                f"ignored stale inspect-camera resolution; signal_session={session_id}; "
-                f"current_session={self._camera_session_id}"
-            )
             return
+        self._set_state("live_preview")
+        self._show_camera_visual()
+        self._set_preview_frame(frame)
+        self._update_operation_state_banner(self._state)
+
+    @Slot(int, int)
+    def _on_controller_resolution_changed(self, width: int, height: int) -> None:
         requested_width = self.width_spin.value()
         requested_height = self.height_spin.value()
         if requested_width and requested_height and (width != requested_width or height != requested_height):
@@ -545,35 +489,34 @@ class InspectCameraPage(QWidget):
         else:
             self._set_feedback(f"Camera started. Actual frame size is {width}x{height}.", ok=True)
 
-    def _on_camera_error(self, message: str) -> None:
-        self._on_camera_error_for_session(self._camera_session_id, message)
-
-    def _on_camera_error_for_session(self, session_id: int, message: str) -> None:
-        if session_id != self._camera_session_id:
-            camera_log(
-                f"ignored stale inspect-camera error; signal_session={session_id}; "
-                f"current_session={self._camera_session_id}; message={message}"
-            )
+    @Slot(str, str, str)
+    def _on_camera_controller_state_changed(self, state: str, message: str, level: str) -> None:
+        if state == CameraControllerState.SOFT_STOPPED.value:
+            self._latest_frame = None
+            self._set_state("idle")
+            self.preview_label.clear_preview("Camera preview stopped.\nStart camera to resume.")
+            self._set_feedback(message, ok=True)
             return
-        self._camera_lifecycle = "stopped"
+        if state in {CameraControllerState.OPENING.value, CameraControllerState.WARMING.value, CameraControllerState.RECOVERING.value}:
+            self._set_state("live_preview")
+        elif state in {CameraControllerState.RELEASED.value, CameraControllerState.FAILED.value}:
+            self._set_state("idle")
+        elif state == CameraControllerState.RUNNING.value:
+            self._set_state("live_preview")
+        banner_level = "warning" if level == "warning" else "info"
+        title = "Reopening camera" if state == CameraControllerState.RECOVERING.value else "Camera"
+        state = "blocked" if level == "warning" else "processing"
+        self.operation_state_banner.set_state(title, message, state, banner_level)
+        self._set_feedback(message, ok=level != "error")
+
+    @Slot(str)
+    def _on_controller_error(self, message: str) -> None:
         self._set_feedback(message, ok=False)
         self._set_state("idle")
         self.operation_state_banner.set_state("Error", message, "error", "error")
 
-    def _on_camera_finished(self) -> None:
-        self._on_camera_finished_for_session(self._camera_session_id)
-
-    def _on_camera_finished_for_session(self, session_id: int) -> None:
-        if session_id != self._camera_session_id:
-            camera_log(
-                f"ignored stale inspect-camera finished; signal_session={session_id}; "
-                f"current_session={self._camera_session_id}; lifecycle={self._camera_lifecycle}"
-            )
-            return
-        camera_log(f"inspect camera worker finished; session={session_id}")
-        self._camera_thread = None
-        self._camera_worker = None
-        self._camera_lifecycle = "stopped"
+    @Slot()
+    def _on_controller_stopped(self) -> None:
         if self._state == "live_preview":
             self._set_state("idle")
 
@@ -630,30 +573,6 @@ class InspectCameraPage(QWidget):
     def _refit_active_preview_if_needed(self) -> None:
         self.result_image_tabs.refit_active_preview_if_needed()
 
-    def _stop_camera_worker(self, session_id: int | None = None) -> bool:
-        worker = self._camera_worker
-        thread = self._camera_thread
-        if worker is not None:
-            try:
-                if shiboken6.isValid(worker):
-                    camera_log(f"requesting inspect camera worker stop; session={session_id}")
-                    worker.stop()
-            except RuntimeError:
-                pass
-        if thread is not None:
-            try:
-                if shiboken6.isValid(thread):
-                    camera_log(f"requesting inspect camera thread quit; session={session_id}")
-                    thread.quit()
-                    if not thread.wait(2500):
-                        camera_log(f"inspect camera thread did not stop within 2500 ms; session={session_id}")
-                        return False
-            except RuntimeError:
-                pass
-        self._camera_thread = None
-        self._camera_worker = None
-        return True
-
     def _stop_inspection_worker(self) -> None:
         thread = self._inspection_thread
         self._inspection_thread = None
@@ -678,17 +597,34 @@ class InspectCameraPage(QWidget):
         captured = state == "captured_preview"
         inspecting = state == "inspecting"
         result_ready = state == "result_ready"
-        camera_running = self._camera_lifecycle in {"starting", "running", "stopping"} or self._camera_thread is not None
-        camera_stopping = self._camera_lifecycle == "stopping"
+        controller_state = (
+            self.camera_controller.state()
+            if hasattr(self, "camera_controller")
+            else CameraControllerState.RELEASED.value
+        )
+        camera_can_start = controller_state in {
+            CameraControllerState.RELEASED.value,
+            CameraControllerState.FAILED.value,
+            CameraControllerState.SOFT_STOPPED.value,
+        }
+        camera_active = controller_state in {
+            CameraControllerState.OPENING.value,
+            CameraControllerState.WARMING.value,
+            CameraControllerState.RUNNING.value,
+            CameraControllerState.RECOVERING.value,
+            CameraControllerState.SOFT_STOPPED.value,
+        }
+        camera_stopping = controller_state == CameraControllerState.STOPPING.value
+        camera_ready = controller_state == CameraControllerState.RUNNING.value and self._latest_frame is not None
 
-        self.start_button.setEnabled((idle or result_ready) and not camera_running)
-        self.stop_button.setEnabled((live or captured or (result_ready and camera_running)) and not camera_stopping)
-        self.capture_button.setEnabled(live and self._camera_lifecycle == "running")
+        self.start_button.setEnabled((idle or result_ready) and camera_can_start and not inspecting)
+        self.stop_button.setEnabled((live or captured or (result_ready and camera_active)) and camera_active and not camera_stopping)
+        self.capture_button.setEnabled(live and camera_ready)
         self.retake_button.setEnabled(captured or result_ready)
         self.inspect_button.setEnabled(captured and self.state.config_path is not None)
         self.open_output_button.setEnabled(not inspecting)
         for widget in (self.camera_index_spin, self.width_spin, self.height_spin):
-            widget.setEnabled(idle and not camera_running)
+            widget.setEnabled(idle and controller_state in {CameraControllerState.RELEASED.value, CameraControllerState.FAILED.value})
         self.output_dir_edit.setEnabled(not inspecting)
         if result_ready:
             self._show_result_visual()

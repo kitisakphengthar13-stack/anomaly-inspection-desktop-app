@@ -11,6 +11,7 @@ import shiboken6
 from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
@@ -36,6 +37,10 @@ ReferenceSavedCallback = Callable[[Path], None]
 CaptureFactory = Callable[..., object]
 
 PREVIEW_INTERVAL_SECONDS = 1.0 / 12.0
+BLANK_STARTUP_FRAME_LOG_LIMIT = 5
+STARTUP_BLANK_RECOVERY_FRAMES = 6
+STARTUP_BLANK_FINAL_FAIL_FRAMES = 6
+MAX_BLANK_RECOVERY_ATTEMPTS = 1
 
 
 def camera_log(message: str) -> None:
@@ -49,11 +54,11 @@ def camera_backend_candidates(platform_name: str | None = None) -> list[tuple[st
     return [("DEFAULT", None)]
 
 
-def open_camera_capture(
+def _open_camera_capture_with_backend(
     camera_index: int,
     capture_factory: CaptureFactory | None = None,
     platform_name: str | None = None,
-) -> tuple[object, str]:
+) -> tuple[object, str, str, int | None]:
     factory = capture_factory or cv2.VideoCapture
     candidates = camera_backend_candidates(platform_name)
     attempted = []
@@ -75,7 +80,7 @@ def open_camera_capture(
                 except Exception:
                     pass
                 camera_log(f"opened camera index {camera_index} with backend {selected}")
-                return capture, selected
+                return capture, selected, backend_name, backend_id
         except Exception as exc:
             camera_log(f"backend {backend_name} open check failed: {exc}")
         try:
@@ -83,6 +88,44 @@ def open_camera_capture(
         except Exception:
             pass
     raise RuntimeError(f"Unable to open camera index {camera_index} using {' or '.join(attempted)}.")
+
+
+def open_camera_capture(
+    camera_index: int,
+    capture_factory: CaptureFactory | None = None,
+    platform_name: str | None = None,
+) -> tuple[object, str]:
+    capture, selected, _, _ = _open_camera_capture_with_backend(camera_index, capture_factory, platform_name)
+    return capture, selected
+
+
+def reopen_camera_capture_with_backend(
+    camera_index: int,
+    backend_name: str,
+    backend_id: int | None,
+    capture_factory: CaptureFactory | None = None,
+) -> tuple[object, str]:
+    factory = capture_factory or cv2.VideoCapture
+    camera_log(f"reopening camera index {camera_index} with backend {backend_name}")
+    capture = factory(camera_index) if backend_id is None else factory(camera_index, backend_id)
+    try:
+        opened = bool(capture.isOpened())
+        camera_log(f"reopened backend {backend_name} isOpened={opened}")
+        if opened:
+            selected = backend_name
+            try:
+                selected = f"{backend_name}/{capture.getBackendName()}"
+            except Exception:
+                pass
+            camera_log(f"reopened camera index {camera_index} with backend {selected}")
+            return capture, selected
+    except Exception as exc:
+        camera_log(f"reopened backend {backend_name} open check failed: {exc}")
+    try:
+        capture.release()
+    except Exception:
+        pass
+    raise RuntimeError(f"Unable to reopen camera index {camera_index} using {backend_name}.")
 
 
 def default_reference_output_path(state: AppState) -> Path:
@@ -132,11 +175,31 @@ def _frame_diagnostics(frame: np.ndarray) -> str:
         return f"frame diagnostics unavailable: {exc}"
 
 
+def is_blank_startup_frame(frame: np.ndarray, *, max_value: int = 2, mean_max: float = 1.0) -> bool:
+    try:
+        return int(frame.max()) <= max_value and float(frame.mean()) <= mean_max
+    except Exception:
+        return False
+
+
+def is_gui_thread() -> bool:
+    app = QApplication.instance()
+    return app is not None and QThread.currentThread() is app.thread()
+
+
+def log_if_not_gui_thread(context: str) -> bool:
+    if is_gui_thread():
+        return True
+    camera_log(f"GUI thread violation ignored in {context}")
+    return False
+
+
 class CameraWorker(QObject):
-    frame_ready = Signal(object)
-    actual_resolution = Signal(int, int)
-    error = Signal(str)
-    finished = Signal()
+    frame_ready = Signal(int, object)
+    actual_resolution = Signal(int, int, int)
+    status = Signal(int, str, str)
+    error = Signal(int, str)
+    finished = Signal(int)
 
     def __init__(
         self,
@@ -144,70 +207,183 @@ class CameraWorker(QObject):
         width: int = 0,
         height: int = 0,
         capture_factory: CaptureFactory | None = None,
+        session_id: int = 0,
+        blank_recovery_frames: int = STARTUP_BLANK_RECOVERY_FRAMES,
+        blank_final_fail_frames: int = STARTUP_BLANK_FINAL_FAIL_FRAMES,
+        max_blank_recovery_attempts: int = MAX_BLANK_RECOVERY_ATTEMPTS,
+        blank_max_value: int = 2,
+        blank_mean_max: float = 1.0,
+        preview_interval_seconds: float = PREVIEW_INTERVAL_SECONDS,
     ) -> None:
         super().__init__()
+        self.session_id = session_id
         self.camera_index = camera_index
         self.width = width
         self.height = height
         self._capture_factory = capture_factory
         self._running = False
+        self._blank_recovery_frames = blank_recovery_frames
+        self._blank_final_fail_frames = blank_final_fail_frames
+        self._max_blank_recovery_attempts = max_blank_recovery_attempts
+        self._blank_max_value = blank_max_value
+        self._blank_mean_max = blank_mean_max
+        self._preview_interval_seconds = preview_interval_seconds
 
     @Slot()
     def run(self) -> None:
         capture = None
+        backend_name = ""
+        backend_label = ""
+        backend_id: int | None = None
+        recovery_attempts = 0
+        startup_frame_count = 0
+        blank_frame_count = 0
+        first_valid_frame_seen = False
+        reported_resolution = False
+        logged_first_read = False
+        logged_first_emit = False
+        last_emit_time = 0.0
         try:
             camera_log(
-                f"worker started: camera_index={self.camera_index}, requested_size={self.width}x{self.height}"
+                f"worker started: session={self.session_id}; camera_index={self.camera_index}, "
+                f"requested_size={self.width}x{self.height}"
             )
-            capture, backend_name = open_camera_capture(self.camera_index, self._capture_factory)
-            if self.width > 0:
-                camera_log(f"requesting camera width {self.width}")
-                capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-            if self.height > 0:
-                camera_log(f"requesting camera height {self.height}")
-                capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            capture, backend_name, backend_label, backend_id = _open_camera_capture_with_backend(
+                self.camera_index,
+                self._capture_factory,
+            )
+            self._configure_capture(capture)
 
             self._running = True
-            reported_resolution = False
-            logged_first_read = False
-            logged_first_emit = False
-            last_emit_time = 0.0
             while self._running:
                 ok, frame = capture.read()
                 if not ok or frame is None:
-                    camera_log("camera frame read failed")
-                    self.error.emit("Could not read camera frame.")
+                    camera_log(f"camera frame read failed; session={self.session_id}")
+                    self.error.emit(self.session_id, "Could not read camera frame.")
                     break
                 if not logged_first_read:
-                    camera_log(f"first successful capture.read() from {backend_name}; frame shape={frame.shape}")
+                    camera_log(
+                        f"first successful capture.read() from {backend_name}; "
+                        f"session={self.session_id}; frame shape={frame.shape}"
+                    )
                     logged_first_read = True
+                if not first_valid_frame_seen:
+                    startup_frame_count += 1
+                    blank_startup = is_blank_startup_frame(
+                        frame,
+                        max_value=self._blank_max_value,
+                        mean_max=self._blank_mean_max,
+                    )
+                    if startup_frame_count <= BLANK_STARTUP_FRAME_LOG_LIMIT:
+                        camera_log(
+                            "camera worker startup frame stats; "
+                            f"session={self.session_id}; backend={backend_name}; "
+                            f"frame_index={startup_frame_count}; blank_frames={blank_frame_count}; "
+                            f"{_frame_diagnostics(frame)}; blank_startup={blank_startup}"
+                        )
+                    if blank_startup:
+                        blank_frame_count += 1
+                        if blank_frame_count == 1:
+                            self.status.emit(self.session_id, "Warming up camera...", "info")
+                        if blank_frame_count == self._blank_recovery_frames - 1 and recovery_attempts < self._max_blank_recovery_attempts:
+                            camera_log(
+                                f"camera worker blank startup recovery pending; session={self.session_id}; "
+                                f"backend={backend_name}; blank_frames={blank_frame_count}"
+                            )
+                            self.status.emit(
+                                self.session_id,
+                                "Blank startup frames detected; reopening camera...",
+                                "warning",
+                            )
+                        if blank_frame_count >= self._blank_recovery_frames:
+                            if recovery_attempts < self._max_blank_recovery_attempts:
+                                if not self._running:
+                                    break
+                                recovery_attempts += 1
+                                camera_log(
+                                    f"camera worker blank startup recovery; session={self.session_id}; "
+                                    f"backend={backend_name}; attempt={recovery_attempts}"
+                                )
+                                self.status.emit(
+                                    self.session_id,
+                                    "Blank startup frames detected; reopening camera...",
+                                    "warning",
+                                )
+                                try:
+                                    capture.release()
+                                    camera_log(f"camera capture released before blank recovery; session={self.session_id}")
+                                except Exception as exc:
+                                    camera_log(f"camera release before blank recovery failed; session={self.session_id}; error={exc}")
+                                capture, backend_name = reopen_camera_capture_with_backend(
+                                    self.camera_index,
+                                    backend_label,
+                                    backend_id,
+                                    self._capture_factory,
+                                )
+                                self._configure_capture(capture)
+                                if not self._running:
+                                    break
+                                startup_frame_count = 0
+                                blank_frame_count = 0
+                                reported_resolution = False
+                                logged_first_read = False
+                                logged_first_emit = False
+                                last_emit_time = 0.0
+                                continue
+                        if recovery_attempts >= self._max_blank_recovery_attempts and blank_frame_count >= self._blank_final_fail_frames:
+                            message = (
+                                "Camera opened but frames stayed blank. "
+                                "Please retry or check exposure, lens, privacy shutter, or driver."
+                            )
+                            camera_log(
+                                f"camera worker blank startup recovery failed; session={self.session_id}; "
+                                f"backend={backend_name}; blank_frames={blank_frame_count}"
+                            )
+                            self.error.emit(self.session_id, message)
+                            break
+                        time.sleep(0.005)
+                        continue
+                    first_valid_frame_seen = True
+                    camera_log(
+                        f"camera worker first valid frame; session={self.session_id}; backend={backend_name}; "
+                        f"startup_frames={startup_frame_count}; blank_frames={blank_frame_count}; "
+                        f"recovery_attempts={recovery_attempts}"
+                    )
                 if not reported_resolution:
                     actual_height, actual_width = frame.shape[:2]
-                    self.actual_resolution.emit(actual_width, actual_height)
+                    self.actual_resolution.emit(self.session_id, actual_width, actual_height)
                     reported_resolution = True
                 now = time.monotonic()
-                if now - last_emit_time >= PREVIEW_INTERVAL_SECONDS:
+                if now - last_emit_time >= self._preview_interval_seconds:
                     if not logged_first_emit:
-                        camera_log("first frame_ready emit")
+                        camera_log(f"first frame_ready emit; session={self.session_id}")
                         logged_first_emit = True
-                    self.frame_ready.emit(frame.copy())
+                    self.frame_ready.emit(self.session_id, frame.copy())
                     last_emit_time = now
                 time.sleep(0.005)
         except Exception as exc:
-            camera_log(f"camera worker error: {exc}")
-            self.error.emit(str(exc))
+            camera_log(f"camera worker error; session={self.session_id}; error={exc}")
+            self.error.emit(self.session_id, str(exc))
         finally:
             if capture is not None:
                 try:
                     capture.release()
-                    camera_log("camera capture released")
+                    camera_log(f"camera capture released; session={self.session_id}")
                 except Exception as exc:
-                    camera_log(f"camera release failed: {exc}")
-            self.finished.emit()
+                    camera_log(f"camera release failed; session={self.session_id}; error={exc}")
+            self.finished.emit(self.session_id)
 
     @Slot()
     def stop(self) -> None:
         self._running = False
+
+    def _configure_capture(self, capture: object) -> None:
+        if self.width > 0:
+            camera_log(f"requesting camera width {self.width}; session={self.session_id}")
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        if self.height > 0:
+            camera_log(f"requesting camera height {self.height}; session={self.session_id}")
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
 
 
 class AspectImageLabel(QWidget):
@@ -233,10 +409,14 @@ class AspectImageLabel(QWidget):
         self._deferred_update_timer.timeout.connect(self._run_deferred_update)
 
     def refresh_theme(self) -> None:
+        if not log_if_not_gui_thread("AspectImageLabel.refresh_theme"):
+            return
         self.setStyleSheet(preview_surface_stylesheet())
         self.update()
 
     def set_frame_pixmap(self, pixmap: QPixmap) -> None:
+        if not log_if_not_gui_thread("AspectImageLabel.set_frame_pixmap"):
+            return
         if not getattr(self, "_logged_first_source_set", False):
             camera_log("first preview source pixmap set")
             self._logged_first_source_set = True
@@ -247,6 +427,8 @@ class AspectImageLabel(QWidget):
         self._defer_update()
 
     def clear_preview(self, message: str = "Camera preview is idle.") -> None:
+        if not log_if_not_gui_thread("AspectImageLabel.clear_preview"):
+            return
         self._source_pixmap = None
         self._message = message
         self.updateGeometry()
@@ -316,12 +498,16 @@ class AspectImageLabel(QWidget):
         painter.drawPixmap(x, y, scaled)
 
     def _defer_update(self) -> None:
+        if not log_if_not_gui_thread("AspectImageLabel._defer_update"):
+            return
         if self._deferred_update_pending:
             return
         self._deferred_update_pending = True
         self._deferred_update_timer.start(0)
 
     def _run_deferred_update(self) -> None:
+        if not log_if_not_gui_thread("AspectImageLabel._run_deferred_update"):
+            return
         self._deferred_update_pending = False
         self.update()
 
@@ -350,6 +536,9 @@ class ReferenceCapturePage(QWidget):
         self._last_actual_resolution: tuple[int, int] | None = None
         self._camera_lifecycle = "stopped"
         self._camera_session_id = 0
+        self._startup_frame_count = 0
+        self._blank_startup_frame_count = 0
+        self._first_valid_frame_seen = False
 
         self._build_ui()
         self.refresh_from_state()
@@ -505,6 +694,9 @@ class ReferenceCapturePage(QWidget):
         self._camera_session_id += 1
         session_id = self._camera_session_id
         self._camera_lifecycle = "starting"
+        self._startup_frame_count = 0
+        self._blank_startup_frame_count = 0
+        self._first_valid_frame_seen = False
         self._latest_frame = None
         self._captured_frame = None
         self._last_actual_resolution = None
@@ -518,15 +710,22 @@ class ReferenceCapturePage(QWidget):
         camera_log(f"start camera clicked; creating camera thread; session={session_id}")
 
         self._thread = QThread(self)
-        self._worker = CameraWorker(self.camera_index_spin.value(), self.width_spin.value(), self.height_spin.value())
+        self._worker = CameraWorker(
+            self.camera_index_spin.value(),
+            self.width_spin.value(),
+            self.height_spin.value(),
+            session_id=session_id,
+        )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
-        self._worker.frame_ready.connect(lambda frame, sid=session_id: self._on_frame_ready_for_session(sid, frame))
+        self._worker.frame_ready.connect(self._on_frame_ready_from_worker, Qt.ConnectionType.QueuedConnection)
         self._worker.actual_resolution.connect(
-            lambda width, height, sid=session_id: self._on_actual_resolution_for_session(sid, width, height)
+            self._on_actual_resolution_from_worker,
+            Qt.ConnectionType.QueuedConnection,
         )
-        self._worker.error.connect(lambda message, sid=session_id: self._on_camera_error_for_session(sid, message))
-        self._worker.finished.connect(lambda sid=session_id: self._on_worker_finished_for_session(sid))
+        self._worker.status.connect(self._on_camera_status_from_worker, Qt.ConnectionType.QueuedConnection)
+        self._worker.error.connect(self._on_camera_error_from_worker, Qt.ConnectionType.QueuedConnection)
+        self._worker.finished.connect(self._on_worker_finished_from_worker, Qt.ConnectionType.QueuedConnection)
         self._worker.finished.connect(self._thread.quit)
         self._worker.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._thread.deleteLater)
@@ -589,7 +788,13 @@ class ReferenceCapturePage(QWidget):
     def _on_frame_ready(self, frame: object) -> None:
         self._on_frame_ready_for_session(self._camera_session_id, frame)
 
+    @Slot(int, object)
+    def _on_frame_ready_from_worker(self, session_id: int, frame: object) -> None:
+        self._on_frame_ready_for_session(session_id, frame)
+
     def _on_frame_ready_for_session(self, session_id: int, frame: object) -> None:
+        if not log_if_not_gui_thread("ReferenceCapturePage._on_frame_ready_for_session"):
+            return
         if session_id != self._camera_session_id:
             camera_log(
                 f"ignored stale reference frame; signal_session={session_id}; "
@@ -601,6 +806,39 @@ class ReferenceCapturePage(QWidget):
             return
         if not isinstance(frame, np.ndarray):
             return
+        if not self._first_valid_frame_seen:
+            self._startup_frame_count += 1
+            blank_startup = is_blank_startup_frame(frame)
+            if self._startup_frame_count <= BLANK_STARTUP_FRAME_LOG_LIMIT:
+                camera_log(
+                    "reference startup frame stats; "
+                    f"session={session_id}; lifecycle={self._camera_lifecycle}; "
+                    f"frame_index={self._startup_frame_count}; {_frame_diagnostics(frame)}; "
+                    f"blank_startup={blank_startup}"
+                )
+            if blank_startup:
+                self._blank_startup_frame_count += 1
+                self._latest_frame = None
+                self._set_state("live_preview")
+                if self._blank_startup_frame_count >= STARTUP_BLANK_FINAL_FAIL_FRAMES:
+                    message = "Camera opened, but frames are blank. Check lens, exposure, lighting, or camera driver."
+                    self.capture_state_banner.set_state("Blank frames", message, "blocked", "warning")
+                    self._set_feedback(message, ok=False)
+                    camera_log(f"reference blank startup warning; session={session_id}; blank_frames={self._blank_startup_frame_count}")
+                else:
+                    self.capture_state_banner.set_state(
+                        "Warming up camera",
+                        "Ignoring blank startup frame.",
+                        "processing",
+                        "info",
+                    )
+                    self._set_feedback("Camera warming up. Waiting for a non-blank frame.", ok=True)
+                return
+            self._first_valid_frame_seen = True
+            camera_log(
+                f"first valid reference frame; session={session_id}; "
+                f"startup_frames={self._startup_frame_count}; blank_frames={self._blank_startup_frame_count}"
+            )
         if not getattr(self, "_logged_first_frame_ready", False):
             camera_log(
                 "first _on_frame_ready in UI thread; "
@@ -610,13 +848,21 @@ class ReferenceCapturePage(QWidget):
         self._camera_lifecycle = "running"
         self._latest_frame = frame
         if self._state == "live_preview":
+            self._set_state(self._state)
+        if self._state == "live_preview":
             self.preview_label.set_frame_pixmap(frame_to_pixmap(frame))
             self._update_capture_state_banner(self._state)
 
     def _on_actual_resolution(self, width: int, height: int) -> None:
         self._on_actual_resolution_for_session(self._camera_session_id, width, height)
 
+    @Slot(int, int, int)
+    def _on_actual_resolution_from_worker(self, session_id: int, width: int, height: int) -> None:
+        self._on_actual_resolution_for_session(session_id, width, height)
+
     def _on_actual_resolution_for_session(self, session_id: int, width: int, height: int) -> None:
+        if not log_if_not_gui_thread("ReferenceCapturePage._on_actual_resolution_for_session"):
+            return
         if session_id != self._camera_session_id:
             camera_log(
                 f"ignored stale reference resolution; signal_session={session_id}; "
@@ -634,10 +880,32 @@ class ReferenceCapturePage(QWidget):
         else:
             self._set_feedback(f"Camera started. Actual frame size is {width}x{height}.", ok=True)
 
+    @Slot(int, str, str)
+    def _on_camera_status_from_worker(self, session_id: int, message: str, level: str) -> None:
+        if not log_if_not_gui_thread("ReferenceCapturePage._on_camera_status_from_worker"):
+            return
+        if session_id != self._camera_session_id:
+            camera_log(
+                f"ignored stale reference status; signal_session={session_id}; "
+                f"current_session={self._camera_session_id}; message={message}"
+            )
+            return
+        banner_level = "warning" if level == "warning" else "info"
+        title = "Reopening camera" if level == "warning" else "Warming up camera"
+        state = "blocked" if level == "warning" else "processing"
+        self.capture_state_banner.set_state(title, message, state, banner_level)
+        self._set_feedback(message, ok=level != "error")
+
     def _on_camera_error(self, message: str) -> None:
         self._on_camera_error_for_session(self._camera_session_id, message)
 
+    @Slot(int, str)
+    def _on_camera_error_from_worker(self, session_id: int, message: str) -> None:
+        self._on_camera_error_for_session(session_id, message)
+
     def _on_camera_error_for_session(self, session_id: int, message: str) -> None:
+        if not log_if_not_gui_thread("ReferenceCapturePage._on_camera_error_for_session"):
+            return
         if session_id != self._camera_session_id:
             camera_log(
                 f"ignored stale reference error; signal_session={session_id}; "
@@ -652,7 +920,13 @@ class ReferenceCapturePage(QWidget):
     def _on_worker_finished(self) -> None:
         self._on_worker_finished_for_session(self._camera_session_id)
 
+    @Slot(int)
+    def _on_worker_finished_from_worker(self, session_id: int) -> None:
+        self._on_worker_finished_for_session(session_id)
+
     def _on_worker_finished_for_session(self, session_id: int) -> None:
+        if not log_if_not_gui_thread("ReferenceCapturePage._on_worker_finished_for_session"):
+            return
         if session_id != self._camera_session_id:
             camera_log(
                 f"ignored stale reference finished; signal_session={session_id}; "
@@ -665,6 +939,8 @@ class ReferenceCapturePage(QWidget):
         self._camera_lifecycle = "stopped"
         if self._state == "live_preview":
             self._set_state("idle")
+        else:
+            self._set_state(self._state)
 
     def _stop_worker(self, session_id: int | None = None) -> bool:
         worker = self._worker
