@@ -2731,6 +2731,104 @@ def test_inspect_camera_capture_state_uses_preview_visual_workspace():
     assert page.preview_label._source_pixmap is not None
 
 
+def test_inspect_camera_preserves_captured_frame_after_preview_stop(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    page = InspectCameraPage(AppState(config_path=Path("configs/local_inspection.yaml")))
+    frame = np.zeros((12, 20, 3), dtype=np.uint8)
+    frame[:, :] = (90, 40, 10)
+    page._latest_frame = frame
+    monkeypatch.setattr(page.camera_controller, "stop_preview", lambda: None)
+
+    page.capture_part()
+    captured = page._captured_frame.copy()
+    page.stop_camera()
+
+    assert page._captured_frame is not None
+    assert np.array_equal(page._captured_frame, captured)
+    assert page._state == "captured_preview"
+    assert page.inspect_button.isEnabled() is True
+
+
+def test_inspect_camera_inspects_preserved_capture_after_preview_stop(tmp_path, monkeypatch):
+    import inspection_app.inspect_camera_page as camera_page_module
+
+    app = QApplication.instance() or QApplication([])
+    config_path = tmp_path / "local_inspection.yaml"
+    config_path.write_text("model: {}\n", encoding="utf-8")
+    output_dir = tmp_path / "camera_output"
+    created_workers = []
+
+    class ImmediateThread(QObject):
+        started = Signal()
+        finished = Signal()
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+
+        def start(self):
+            self.started.emit()
+
+        def quit(self):
+            self.finished.emit()
+
+        def wait(self, timeout=None):
+            return True
+
+    class FakeInspectionWorker(QObject):
+        completed = Signal(object, object)
+        failed = Signal(str)
+        status = Signal(str)
+        finished = Signal()
+
+        def __init__(
+            self,
+            config_path,
+            image_path,
+            output_dir,
+            inspection_mode="image",
+            runtime_manager=None,
+        ):
+            super().__init__()
+            self.config_path = Path(config_path)
+            self.image_path = Path(image_path)
+            self.output_dir = Path(output_dir)
+            self.inspection_mode = inspection_mode
+            self.runtime_manager = runtime_manager
+            created_workers.append(self)
+
+        def moveToThread(self, thread):
+            self.thread = thread
+
+        def run(self):
+            self.finished.emit()
+
+    monkeypatch.setattr(camera_page_module, "QThread", ImmediateThread)
+    monkeypatch.setattr(camera_page_module, "InspectionWorker", FakeInspectionWorker)
+
+    page = InspectCameraPage(AppState(config_path=config_path))
+    page.output_dir_edit.setText(str(output_dir))
+    frame = np.zeros((10, 14, 3), dtype=np.uint8)
+    frame[:, :] = (11, 22, 33)
+    page._latest_frame = frame
+    monkeypatch.setattr(page.camera_controller, "stop_preview", lambda: None)
+
+    page.capture_part()
+    page.stop_camera()
+    page.inspect_captured_image()
+
+    assert len(created_workers) == 1
+    worker = created_workers[0]
+    assert worker.config_path == config_path
+    assert worker.output_dir == output_dir
+    assert worker.inspection_mode == "camera"
+    assert worker.image_path.parent == output_dir / "captured"
+    assert worker.image_path.exists()
+    saved = cv2.imread(str(worker.image_path), cv2.IMREAD_COLOR)
+    assert saved is not None
+    assert saved.shape == frame.shape
+    assert np.array_equal(saved, frame)
+
+
 def test_inspect_camera_retake_after_error_result_returns_to_preview_visual_workspace():
     app = QApplication.instance() or QApplication([])
     page = InspectCameraPage(AppState())

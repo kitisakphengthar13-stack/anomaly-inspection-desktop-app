@@ -365,8 +365,12 @@ class InspectCameraPage(QWidget):
 
     def stop_camera(self) -> None:
         self._latest_frame = None
-        self._captured_frame = None
         self.camera_controller.stop_preview()
+        if self._captured_frame is not None:
+            self._set_state("captured_preview")
+            self._set_preview_frame(self._captured_frame)
+            self._set_feedback("Camera stopped. Captured frame preserved.", ok=True)
+            return
         self._set_state("idle")
         self.preview_label.clear_preview("Camera preview stopped.\nStart camera to resume.")
         self._set_feedback("Camera stopped.", ok=True)
@@ -493,8 +497,12 @@ class InspectCameraPage(QWidget):
     def _on_camera_controller_state_changed(self, state: str, message: str, level: str) -> None:
         if state == CameraControllerState.SOFT_STOPPED.value:
             self._latest_frame = None
-            self._set_state("idle")
-            self.preview_label.clear_preview("Camera preview stopped.\nStart camera to resume.")
+            if self._captured_frame is not None:
+                self._set_state("captured_preview")
+                self._set_preview_frame(self._captured_frame)
+            else:
+                self._set_state("idle")
+                self.preview_label.clear_preview("Camera preview stopped.\nStart camera to resume.")
             self._set_feedback(message, ok=True)
             return
         if state in {CameraControllerState.OPENING.value, CameraControllerState.WARMING.value, CameraControllerState.RECOVERING.value}:
