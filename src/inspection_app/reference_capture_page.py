@@ -14,9 +14,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QGridLayout,
-    QHBoxLayout,
     QLabel,
-    QLineEdit,
     QPushButton,
     QSizePolicy,
     QSplitter,
@@ -28,9 +26,10 @@ from PySide6.QtWidgets import (
 from inspection.reference_capture import save_reference_image
 from inspection_app.icons import icon_pixmap, state_icon
 from inspection_app.job_paths import default_reference_image_path as job_reference_image_path
+from inspection_app.layout_contracts import ActionSection
 from inspection_app.state import AppState
 from inspection_app.theme import page_margins, preview_surface_stylesheet, theme_dimensions, theme_spacing, zero_margins
-from inspection_app.ui_components import ActionButtonRow, ScrollablePane, SectionPanel, StatusBanner, set_button_icon, set_button_role
+from inspection_app.ui_components import PathPickerRow, ScrollablePane, SectionPanel, StatusBanner, set_button_icon, set_button_role
 
 StatusCallback = Callable[[str], None]
 ReferenceSavedCallback = Callable[[Path], None]
@@ -642,24 +641,18 @@ class ReferenceCapturePage(QWidget):
 
         for button in (self.start_button, self.stop_button, self.capture_button, self.save_button, self.retake_button):
             set_button_role(button, "secondary")
-        panel.content_layout.addWidget(ActionButtonRow((self.start_button, self.capture_button, self.save_button, self.retake_button)))
-        panel.content_layout.addWidget(ActionButtonRow((self.stop_button,)))
+        action_section = ActionSection(rows=2)
+        action_section.add_row((self.start_button, self.capture_button, self.save_button, self.retake_button))
+        action_section.add_row((self.stop_button,))
+        panel.content_layout.addWidget(action_section)
         panel.content_layout.addWidget(self.feedback_label)
         return panel
 
     def _save_target_group(self) -> SectionPanel:
         panel = SectionPanel("Save Target", compact=True)
-        self.output_path_edit = QLineEdit()
-        self.output_path_edit.setMinimumWidth(0)
-        browse_button = QPushButton("Choose Save Path...")
-        set_button_icon(browse_button, "browse")
-        browse_button.clicked.connect(self.choose_output_path)
-        path_row = QWidget()
-        path_layout = QHBoxLayout(path_row)
-        path_layout.setContentsMargins(*zero_margins())
-        path_layout.addWidget(self.output_path_edit, 1)
-        path_layout.addWidget(browse_button)
-        panel.content_layout.addWidget(path_row)
+        self.output_path_row = PathPickerRow("Choose Save Path...", self.choose_output_path)
+        self.output_path_edit = self.output_path_row.line_edit
+        panel.content_layout.addWidget(self.output_path_row)
         return panel
 
     def refresh_from_state(self) -> None:
