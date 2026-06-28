@@ -592,7 +592,7 @@ class ReferenceCapturePage(QWidget):
         return panel
 
     def _settings_group(self) -> SectionPanel:
-        panel = SectionPanel("Camera", compact=True)
+        panel = SectionPanel("Camera", compact=True, classic=True)
         grid = QGridLayout()
         spacing = theme_spacing()
         grid.setContentsMargins(*zero_margins())
@@ -649,7 +649,7 @@ class ReferenceCapturePage(QWidget):
         return panel
 
     def _save_target_group(self) -> SectionPanel:
-        panel = SectionPanel("Save Target", compact=True)
+        panel = SectionPanel("Save Target", compact=True, classic=True)
         self.output_path_row = PathPickerRow("Choose Save Path...", self.choose_output_path)
         self.output_path_edit = self.output_path_row.line_edit
         panel.content_layout.addWidget(self.output_path_row)
