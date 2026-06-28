@@ -43,9 +43,10 @@ from inspection_app.runtime import (
     RUNTIME_READY,
     PreparedRuntimeManager,
 )
+from inspection_app.layout_contracts import ActionSection
 from inspection_app.state import AppState
 from inspection_app.theme import page_margins, theme_spacing, zero_margins
-from inspection_app.ui_components import ActionButtonRow, MetricGrid, PathPickerRow, SectionPanel, StatusBanner, set_button_icon, set_button_role
+from inspection_app.ui_components import MetricGrid, PathPickerRow, SectionPanel, StatusBanner, set_button_icon, set_button_role
 
 StatusCallback = Callable[[str], None]
 SAMPLE_REFERENCE_IMAGE_PATH = Path("path/to/reference_image.png")
@@ -216,7 +217,9 @@ class ProjectSetupPage(QWidget):
         validate_button = set_button_role(QPushButton("Validate Config"), "secondary")
         set_button_icon(validate_button, "ready")
         validate_button.clicked.connect(self.validate_current_config)
-        layout.addWidget(ActionButtonRow((save_button, save_as_button, validate_button)))
+        action_section = ActionSection(rows=1)
+        action_section.add_row((save_button, save_as_button, validate_button))
+        layout.addWidget(action_section)
         return panel
 
     def _runtime_row(self) -> QWidget:
