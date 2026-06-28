@@ -181,7 +181,7 @@ class InspectImagePage(QWidget):
         return widget
 
     def _inputs_group(self) -> SectionPanel:
-        panel = SectionPanel("Input Image", compact=True)
+        panel = SectionPanel("Input Image", compact=True, classic=True)
         self.inputs_panel = panel
         grid = QGridLayout()
         spacing = theme_spacing()

@@ -56,11 +56,13 @@ class PageHeader(QWidget):
 
 
 class SectionPanel(QWidget):
-    def __init__(self, title: str, subtitle: str | None = None, *, compact: bool = False) -> None:
+    def __init__(self, title: str, subtitle: str | None = None, *, compact: bool = False, classic: bool = False) -> None:
         super().__init__()
         self.setObjectName("sectionPanel")
         if compact:
             self.setProperty("density", "compact")
+        if classic:
+            self.setProperty("styleVariant", "classic")
         layout = QVBoxLayout(self)
         theme_gap = theme_spacing()
         padding = theme_gap.panel_padding if not compact else theme_gap.compact_panel_padding

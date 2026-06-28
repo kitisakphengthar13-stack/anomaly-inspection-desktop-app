@@ -316,6 +316,15 @@ def test_compact_section_panel_marks_density():
     assert panel.content_layout.spacing() <= 5
 
 
+def test_classic_section_panel_marks_native_variant():
+    app = QApplication.instance() or QApplication([])
+    panel = SectionPanel("Source", compact=True, classic=True)
+
+    assert panel.property("density") == "compact"
+    assert panel.property("styleVariant") == "classic"
+    assert 'QWidget#sectionPanel[styleVariant="classic"]' in build_app_stylesheet()
+
+
 def test_status_banner_sets_and_clears_message():
     app = QApplication.instance() or QApplication([])
     banner = StatusBanner()
@@ -2123,6 +2132,7 @@ def test_inspect_image_page_summary_widgets_exist():
     dimensions = theme_dimensions()
 
     assert page.inputs_panel.property("density") == "compact"
+    assert page.inputs_panel.property("styleVariant") == "classic"
     assert page.inputs_panel.findChild(QLabel).text() == "Input Image"
     assert isinstance(page.workspace, WorkbenchLayout)
     assert page.findChild(QScrollArea, "inspectImageLeftPaneScroll") is not None

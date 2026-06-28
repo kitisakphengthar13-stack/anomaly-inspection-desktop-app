@@ -680,6 +680,10 @@ def build_app_stylesheet(theme: InspectionTheme | None = None) -> str:
         border: 1px solid {p.border};
         border-radius: {d.radius}px;
     }}
+    QWidget#sectionPanel[styleVariant="classic"] {{
+        background: {p.surface_elevated};
+        border: 1px solid {p.border_strong};
+    }}
     QLabel#sectionPanelTitle {{
         color: {p.text_primary};
         font-size: {t.section_title_px}px;
