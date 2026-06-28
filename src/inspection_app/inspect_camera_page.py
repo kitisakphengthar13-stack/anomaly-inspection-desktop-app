@@ -216,7 +216,7 @@ class InspectCameraPage(QWidget):
         return widget
 
     def _camera_readiness_group(self) -> SectionPanel:
-        panel = SectionPanel("Camera", compact=True)
+        panel = SectionPanel("Camera", compact=True, classic=True)
         grid = QGridLayout()
         spacing = theme_spacing()
         grid.setContentsMargins(*zero_margins())
@@ -283,7 +283,7 @@ class InspectCameraPage(QWidget):
         return panel
 
     def _setup_output_group(self) -> SectionPanel:
-        panel = SectionPanel("Config and Output", compact=True)
+        panel = SectionPanel("Config and Output", compact=True, classic=True)
         grid = QGridLayout()
         spacing = theme_spacing()
         grid.setContentsMargins(*zero_margins())
