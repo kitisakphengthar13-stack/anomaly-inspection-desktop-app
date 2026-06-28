@@ -328,7 +328,7 @@ class ProjectSetupPage(QWidget):
         return panel
 
     def _output_group(self) -> SectionPanel:
-        panel = SectionPanel("Outputs")
+        panel = SectionPanel("Outputs", classic=True)
 
         self.save_annotated_checkbox = QCheckBox("Save annotated image")
         self.save_heatmap_checkbox = QCheckBox("Save heatmap")
