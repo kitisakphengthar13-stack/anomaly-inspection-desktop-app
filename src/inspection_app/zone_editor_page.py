@@ -38,8 +38,8 @@ from inspection_app.theme import (
     zero_margins,
     zone_overlay_palette,
 )
+from inspection_app.layout_contracts import ActionSection
 from inspection_app.ui_components import (
-    ActionButtonRow,
     PathPickerRow,
     ScrollablePane,
     SectionPanel,
@@ -290,8 +290,10 @@ class ZoneEditorPage(QWidget):
             button.clicked.connect(callback)
             set_button_role(button, "primary" if label == "Save Zones" else "secondary")
             buttons.append(button)
-        panel.content_layout.addWidget(ActionButtonRow(buttons[:3]))
-        panel.content_layout.addWidget(ActionButtonRow(buttons[3:]))
+        action_section = ActionSection(rows=2)
+        action_section.add_row(buttons[:3])
+        action_section.add_row(buttons[3:])
+        panel.content_layout.addWidget(action_section)
         panel.content_layout.addWidget(self.feedback_label)
         return panel
 
