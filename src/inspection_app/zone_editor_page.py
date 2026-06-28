@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QGraphicsView,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QPushButton,
     QSizePolicy,
     QSplitter,
@@ -39,7 +38,15 @@ from inspection_app.theme import (
     zero_margins,
     zone_overlay_palette,
 )
-from inspection_app.ui_components import ActionButtonRow, ScrollablePane, SectionPanel, StatusBanner, set_button_icon, set_button_role
+from inspection_app.ui_components import (
+    ActionButtonRow,
+    PathPickerRow,
+    ScrollablePane,
+    SectionPanel,
+    StatusBanner,
+    set_button_icon,
+    set_button_role,
+)
 
 Point = tuple[int, int]
 StatusCallback = Callable[[str], None]
@@ -238,10 +245,12 @@ class ZoneEditorPage(QWidget):
         group = SectionPanel("Reference", compact=True, classic=True)
         layout = group.content_layout
 
-        self.reference_path_edit = QLineEdit()
-        self.zones_path_edit = QLineEdit()
-        layout.addLayout(self._path_row(self.reference_path_edit, "Browse Reference...", self._browse_reference))
-        layout.addLayout(self._path_row(self.zones_path_edit, "Choose Zones Path...", self._choose_zones_path))
+        self.reference_path_row = PathPickerRow("Browse Reference...", self._browse_reference)
+        self.reference_path_edit = self.reference_path_row.line_edit
+        self.zones_path_row = PathPickerRow("Choose Zones Path...", self._choose_zones_path)
+        self.zones_path_edit = self.zones_path_row.line_edit
+        layout.addWidget(self.reference_path_row)
+        layout.addWidget(self.zones_path_row)
 
         button_row = QHBoxLayout()
         self.load_button = QPushButton("Load Reference Image")
@@ -261,14 +270,6 @@ class ZoneEditorPage(QWidget):
         button_row.addStretch(1)
         layout.addLayout(button_row)
         return group
-
-    def _path_row(self, line_edit: QLineEdit, button_text: str, callback: Callable[[], None]) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.addWidget(line_edit, 1)
-        button = QPushButton(button_text)
-        button.clicked.connect(callback)
-        row.addWidget(button)
-        return row
 
     def _actions_group(self) -> SectionPanel:
         panel = SectionPanel("Zone Tools", compact=True)
