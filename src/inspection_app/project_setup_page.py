@@ -190,7 +190,7 @@ class ProjectSetupPage(QWidget):
         return panel
 
     def _project_group(self) -> SectionPanel:
-        panel = SectionPanel("Inspection Job", compact=True)
+        panel = SectionPanel("Inspection Job", compact=True, classic=True)
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.job_name_edit = QLineEdit()
@@ -199,7 +199,7 @@ class ProjectSetupPage(QWidget):
         return panel
 
     def _config_group(self) -> SectionPanel:
-        panel = SectionPanel("Config File", compact=True)
+        panel = SectionPanel("Config File", compact=True, classic=True)
         layout = panel.content_layout
 
         path_row = PathPickerRow("Open Config...", self.open_config)
@@ -240,7 +240,7 @@ class ProjectSetupPage(QWidget):
         return runtime_row
 
     def _model_group(self) -> SectionPanel:
-        panel = SectionPanel("Model", compact=True)
+        panel = SectionPanel("Model", compact=True, classic=True)
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
@@ -274,7 +274,7 @@ class ProjectSetupPage(QWidget):
         return panel
 
     def _presence_group(self) -> SectionPanel:
-        panel = SectionPanel("Presence Gate", compact=True)
+        panel = SectionPanel("Presence Gate", compact=True, classic=True)
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
