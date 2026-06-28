@@ -235,7 +235,7 @@ class ZoneEditorPage(QWidget):
         return panel
 
     def _paths_group(self) -> SectionPanel:
-        group = SectionPanel("Reference", compact=True)
+        group = SectionPanel("Reference", compact=True, classic=True)
         layout = group.content_layout
 
         self.reference_path_edit = QLineEdit()
