@@ -5,6 +5,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from anomaly_inspection.core.reference_image import save_reference_image
 from anomaly_inspection.cli_support.toolbar_ui import (
     DisplayLayout,
     ToolbarButton,
@@ -16,14 +17,6 @@ from anomaly_inspection.cli_support.toolbar_ui import (
 
 LIVE_ACTIONS = (("capture", "Capture Background"), ("quit", "Quit"))
 CAPTURED_ACTIONS = (("save", "Use as Reference"), ("retake", "Retake"), ("quit", "Quit"))
-
-
-def save_reference_image(frame: np.ndarray, output_path: str | Path) -> Path:
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(output_path), frame):
-        raise ValueError(f"Could not save reference image to {output_path}")
-    return output_path
 
 
 class ReferenceCaptureUI:

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
 from PySide6.QtWidgets import QApplication
+
+from anomaly_inspection.resources import ui_asset_path
 
 
 @dataclass(frozen=True)
@@ -613,7 +614,7 @@ def zone_overlay_palette(theme: InspectionTheme | None = None) -> ZoneOverlayPal
 
 
 def _style_asset_url(filename: str) -> str:
-    return (Path(__file__).resolve().parents[2] / "assets" / "ui" / filename).as_posix()
+    return ui_asset_path(filename).as_posix()
 
 
 def build_app_stylesheet(theme: InspectionTheme | None = None) -> str:

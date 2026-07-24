@@ -119,6 +119,7 @@ from anomaly_inspection.desktop.ui.components import (
     StatusBanner,
 )
 from anomaly_inspection.desktop.ui.locale import APP_LOCALE, configure_app_locale
+from anomaly_inspection.resources import image_asset_path, ui_asset_path
 from anomaly_inspection.desktop.pages.zone_editor import (
     ZoneEditorPage,
     compute_zone_canvas_style,
@@ -244,10 +245,10 @@ def test_theme_stylesheet_contains_shell_rules():
     assert "QSpinBox::down-arrow" in stylesheet
     assert "QDoubleSpinBox::up-arrow" in stylesheet
     assert "QDoubleSpinBox::down-arrow" in stylesheet
-    assert "assets/ui/spinbox_arrow_up_on_light.svg" in stylesheet
-    assert "assets/ui/spinbox_arrow_down_on_light.svg" in stylesheet
-    assert "assets/ui/spinbox_arrow_up_on_dark.svg" in build_app_stylesheet(resolve_theme("factory_dark"))
-    assert "assets/ui/spinbox_arrow_down_on_dark.svg" in build_app_stylesheet(resolve_theme("factory_dark"))
+    assert "resources/ui/spinbox_arrow_up_on_light.svg" in stylesheet
+    assert "resources/ui/spinbox_arrow_down_on_light.svg" in stylesheet
+    assert "resources/ui/spinbox_arrow_up_on_dark.svg" in build_app_stylesheet(resolve_theme("factory_dark"))
+    assert "resources/ui/spinbox_arrow_down_on_dark.svg" in build_app_stylesheet(resolve_theme("factory_dark"))
     assert "QPushButton:focus" in stylesheet
     assert "QPushButton:disabled:hover" in stylesheet
     assert "QTabBar::tab:selected" in stylesheet
@@ -257,8 +258,8 @@ def test_theme_stylesheet_contains_shell_rules():
     assert "QCheckBox::indicator:checked" in stylesheet
     assert "QCheckBox::indicator:disabled" in stylesheet
     assert "QRadioButton::indicator" in stylesheet
-    assert "assets/ui/checkbox_check.svg" in stylesheet
-    assert "assets/ui/radio_dot.svg" in stylesheet
+    assert "resources/ui/checkbox_check.svg" in stylesheet
+    assert "resources/ui/radio_dot.svg" in stylesheet
     assert "QStatusBar" not in stylesheet
     assert DEFAULT_THEME_NAME == "industrial_light_devcpp"
     assert "#f3f3f3" in stylesheet
@@ -272,6 +273,27 @@ def test_icon_helpers_resolve_app_logo_and_semantic_icons():
     assert qtawesome_available() is True
     icon = state_icon("ready")
     assert icon is not None
+
+
+def test_packaged_ui_assets_exist_and_are_referenced_by_the_stylesheet():
+    stylesheets = build_app_stylesheet() + build_app_stylesheet(resolve_theme("factory_dark"))
+    asset_names = (
+        "checkbox_check.svg",
+        "checkbox_check_disabled.svg",
+        "radio_dot.svg",
+        "radio_dot_disabled.svg",
+        "spinbox_arrow_disabled.svg",
+        "spinbox_arrow_down_on_dark.svg",
+        "spinbox_arrow_down_on_light.svg",
+        "spinbox_arrow_up_on_dark.svg",
+        "spinbox_arrow_up_on_light.svg",
+    )
+
+    assert image_asset_path("logo.png").is_file()
+    for asset_name in asset_names:
+        asset_path = ui_asset_path(asset_name)
+        assert asset_path.is_file()
+        assert asset_path.as_posix() in stylesheets
 
 
 def test_theme_registry_contains_factory_presets():

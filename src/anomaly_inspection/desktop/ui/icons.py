@@ -12,6 +12,7 @@ from PySide6.QtCore import QSize
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import QApplication
 
+from anomaly_inspection.resources import image_asset_path
 from anomaly_inspection.desktop.ui.theme import active_theme, result_colors, status_colors
 
 
@@ -119,7 +120,7 @@ def qtawesome_available() -> bool:
 
 
 def app_logo_path() -> Path:
-    return Path(__file__).resolve().parents[4] / "assets" / "images" / "logo.png"
+    return image_asset_path("logo.png")
 
 
 def app_window_icon() -> QIcon:

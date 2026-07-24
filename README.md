@@ -32,7 +32,7 @@ YouTube Demo: [Watch the demo](https://www.youtube.com/watch?v=actU9yC096Y)
 
 ## System Preview
 
-![Sample Inspection](assets/images/sample_inspection.png)
+![Sample Inspection](src/anomaly_inspection/resources/images/sample_inspection.png)
 
 ---
 
@@ -130,7 +130,7 @@ inspection-app
 inspection-cli --help
 ```
 
-Packaging note: the current editable workflow still resolves GUI assets and public config templates from the repository layout. A future wheel-packaging pass should move those runtime resources under the Python package and load them with package-resource APIs.
+GUI assets are shipped as package data, so editable and wheel installs use the same asset paths. Public configuration templates remain under `configs/` for local setup.
 
 ## Desktop App
 

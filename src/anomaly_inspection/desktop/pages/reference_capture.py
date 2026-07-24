@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from anomaly_inspection.cli_support.reference_capture import save_reference_image
+from anomaly_inspection.core.reference_image import save_reference_image
 from anomaly_inspection.desktop.ui.icons import icon_pixmap, state_icon
 from anomaly_inspection.desktop.job_paths import default_reference_image_path as job_reference_image_path
 from anomaly_inspection.desktop.ui.layout_contracts import ActionSection

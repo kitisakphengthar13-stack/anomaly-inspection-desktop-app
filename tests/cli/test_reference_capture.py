@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-from anomaly_inspection.cli_support.reference_capture import save_reference_image
+from anomaly_inspection.core.reference_image import save_reference_image
 
 
 def test_save_reference_image_creates_parent_directory(tmp_path):

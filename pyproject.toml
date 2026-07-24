@@ -50,6 +50,13 @@ all = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+anomaly_inspection = [
+  "resources/ui/*.svg",
+  "resources/images/*.png",
+  "resources/images/*.ico",
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
