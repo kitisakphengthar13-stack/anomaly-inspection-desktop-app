@@ -8,6 +8,22 @@ It is designed for practical fixed-camera inspection experiments where generated
 
 ---
 
+## Package Layout
+
+The desktop application is the primary product. The command-line interface is a secondary adapter for automation and debugging; both call the same core inspection logic.
+
+```text
+src/anomaly_inspection/
+  core/          inspection rules, pipeline, model adapters, and result contracts
+  desktop/       PySide6 application, workflow pages, and reusable UI components
+  cli.py         command-line entry point
+  cli_support/   OpenCV helpers used only by CLI setup commands
+```
+
+Tests follow the same boundaries under `tests/core`, `tests/desktop`, `tests/cli`, and `tests/tools`.
+
+---
+
 ## Demo
 
 YouTube Demo: [Watch the demo](https://www.youtube.com/watch?v=actU9yC096Y)
@@ -103,15 +119,15 @@ python -m pytest
 After editable install, command-line entry points are available:
 
 ```bash
-inspection-app
-inspection-cli --help
+anomaly-inspection
+anomaly-inspection-cli --help
 ```
 
-The root launcher scripts also remain supported from the repository root:
+The former command names remain available as compatibility aliases:
 
 ```bash
-python inspection_app.py
-python inspection_cli.py
+inspection-app
+inspection-cli --help
 ```
 
 Packaging note: the current editable workflow still resolves GUI assets and public config templates from the repository layout. A future wheel-packaging pass should move those runtime resources under the Python package and load them with package-resource APIs.
@@ -123,13 +139,7 @@ The PySide6 desktop frontend is the primary app experience, with the existing CL
 Launch it after installing the `gui` extra:
 
 ```bash
-inspection-app
-```
-
-Or launch it from the repository root:
-
-```bash
-python inspection_app.py
+anomaly-inspection
 ```
 
 The Project Setup page can:
@@ -298,13 +308,13 @@ Real local artifacts are intentionally ignored: local configs, generated zone JS
 Capture an empty reference image from a webcam:
 
 ```bash
-python inspection_cli.py capture-reference --output data/reference/empty_reference.png --camera-index 0
+anomaly-inspection-cli capture-reference --output data/reference/empty_reference.png --camera-index 0
 ```
 
 Optional camera resolution request:
 
 ```bash
-python inspection_cli.py capture-reference --output data/reference/empty_reference.png --camera-index 0 --width 1280 --height 720
+anomaly-inspection-cli capture-reference --output data/reference/empty_reference.png --camera-index 0 --width 1280 --height 720
 ```
 
 The webcam UI keeps the full camera frame visible and appends a bottom toolbar below it. The window is resizable; the preview is display-scaled to fit the current window while preserving the original frame aspect ratio. In live preview, use `Capture Background` to freeze the current frame or `Quit` to exit without saving. In captured preview, use `Use as Reference` to save the frozen frame, `Retake` to return to live preview, or `Quit` to exit without saving. The saved reference image is the original captured frame, not the resized preview; its resolution must match the later zone JSON and inspection images.
@@ -312,7 +322,7 @@ The webcam UI keeps the full camera frame visible and appends a bottom toolbar b
 Draw polygon zones on the reference image:
 
 ```bash
-python inspection_cli.py setup-zones --image data/reference/empty_reference.png --zones configs/zones.json
+anomaly-inspection-cli setup-zones --image data/reference/empty_reference.png --zones configs/zones.json
 ```
 
 Use your copied local config with `presence.zones_path` set to the generated file, for example `configs/zones.json`.
@@ -351,7 +361,7 @@ Recommended setup order before first inspection:
 Validate config, zones, and reference image:
 
 ```bash
-python inspection_cli.py validate-config --config configs/local_inspection.yaml
+anomaly-inspection-cli validate-config --config configs/local_inspection.yaml
 ```
 
 `validate-config` reads the configured empty reference image and zone JSON, so create the reference image and zones before using it for the inspection workflow.
@@ -359,19 +369,19 @@ python inspection_cli.py validate-config --config configs/local_inspection.yaml
 Run only the presence checker:
 
 ```bash
-python inspection_cli.py test-presence --image data/samples/test_001.png --config configs/local_inspection.yaml --output outputs/presence_debug
+anomaly-inspection-cli test-presence --image data/samples/test_001.png --config configs/local_inspection.yaml --output outputs/presence_debug
 ```
 
 Inspect one image:
 
 ```bash
-python inspection_cli.py inspect-image --image data/samples/test_001.png --config configs/local_inspection.yaml --output outputs/single_test
+anomaly-inspection-cli inspect-image --image data/samples/test_001.png --config configs/local_inspection.yaml --output outputs/single_test
 ```
 
 Inspect a folder:
 
 ```bash
-python inspection_cli.py inspect-folder --input data/samples/batch --config configs/local_inspection.yaml --output outputs/transistor/folder
+anomaly-inspection-cli inspect-folder --input data/samples/batch --config configs/local_inspection.yaml --output outputs/transistor/folder
 ```
 
 If `output.show_images` is `true`, `inspect-image` displays saved annotated, heatmap, and presence-mask outputs after inspection and waits for a key press before closing the windows. For `inspect-folder`, it does the same for each image before proceeding to the next one. Set `show_images: false` for unattended or headless runs. Annotated outputs preserve the source image and, for NG results with usable anomaly heatmap evidence, add red defect contours only; metrics and status text remain in CSVs, terminal output, and the desktop UI.
@@ -383,7 +393,7 @@ If `output.save_csv_log` is `true`, single-image inspections append one row to `
 Validate an anomaly model on arbitrary normal/abnormal folder mappings:
 
 ```bash
-python inspection_cli.py validate-anomaly-model \
+anomaly-inspection-cli validate-anomaly-model \
   --test-root "path/to/brainMRI/test" \
   --normal-folders good \
   --abnormal-folders bad \
@@ -394,7 +404,7 @@ python inspection_cli.py validate-anomaly-model \
 Splicing connector example:
 
 ```bash
-python inspection_cli.py validate-anomaly-model \
+anomaly-inspection-cli validate-anomaly-model \
   --test-root "path/to/splicing_connectors/test" \
   --normal-folders good \
   --abnormal-folders logical_anomalies structural_anomalies \

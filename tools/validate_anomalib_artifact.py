@@ -17,7 +17,7 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from inspection.anomaly_inferencer import (  # noqa: E402
+from anomaly_inspection.core.anomaly_inferencer import (  # noqa: E402
     AnomalyInferencer,
     extract_heatmap,
     extract_pred_label,

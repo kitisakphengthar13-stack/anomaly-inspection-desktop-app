@@ -14,8 +14,11 @@ dependencies = [
 ]
 
 [project.scripts]
-inspection-app = "inspection_app.app:main"
-inspection-cli = "inspection.main:main"
+anomaly-inspection = "anomaly_inspection.desktop.main:main"
+anomaly-inspection-cli = "anomaly_inspection.cli:main"
+# Compatibility aliases for the existing installed commands.
+inspection-app = "anomaly_inspection.desktop.main:main"
+inspection-cli = "anomaly_inspection.cli:main"
 
 [project.optional-dependencies]
 gui = [
