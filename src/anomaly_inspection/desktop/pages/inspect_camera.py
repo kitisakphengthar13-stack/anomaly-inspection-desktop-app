@@ -226,7 +226,9 @@ class InspectCameraPage(QWidget):
         self.camera_index_spin = QSpinBox()
         self.camera_index_spin.setRange(0, 32)
         self.camera_index_spin.setValue(0)
-        grid.addWidget(QLabel("Camera index"), 0, 0)
+        camera_index_label = QLabel("&Camera index")
+        camera_index_label.setBuddy(self.camera_index_spin)
+        grid.addWidget(camera_index_label, 0, 0)
         grid.addWidget(self.camera_index_spin, 0, 1)
 
         self.width_spin = QSpinBox()
@@ -235,7 +237,9 @@ class InspectCameraPage(QWidget):
         self.height_spin = QSpinBox()
         self.height_spin.setRange(0, 10000)
         self.height_spin.setSpecialValueText("Auto")
-        grid.addWidget(QLabel("Requested frame size"), 0, 2)
+        frame_size_label = QLabel("Requested frame &size")
+        frame_size_label.setBuddy(self.width_spin)
+        grid.addWidget(frame_size_label, 0, 2)
         grid.addWidget(self.width_spin, 0, 3)
         grid.addWidget(QLabel("x"), 0, 4)
         grid.addWidget(self.height_spin, 0, 5)
@@ -262,6 +266,8 @@ class InspectCameraPage(QWidget):
         self.inspect_button = QPushButton("Inspect Captured Image")
         set_button_icon(self.inspect_button, "run")
         self.inspect_button.clicked.connect(self.inspect_captured_image)
+        self.cancel_inspection_button = QPushButton("Cancel Inspection")
+        self.cancel_inspection_button.clicked.connect(self.cancel_inspection)
         self.open_output_button = QPushButton("Open Output Folder")
         set_button_icon(self.open_output_button, "open")
         self.open_output_button.clicked.connect(self.open_output_folder)
@@ -272,12 +278,13 @@ class InspectCameraPage(QWidget):
             self.capture_button,
             self.retake_button,
             self.inspect_button,
+            self.cancel_inspection_button,
             self.open_output_button,
         ):
             set_button_role(button, "secondary")
         action_section = ActionSection(rows=2)
         action_section.add_row((self.start_button, self.capture_button, self.inspect_button, self.retake_button))
-        action_section.add_row((self.stop_button, self.open_output_button))
+        action_section.add_row((self.stop_button, self.cancel_inspection_button, self.open_output_button))
         panel.content_layout.addWidget(action_section)
         panel.content_layout.addWidget(self.feedback_label)
         return panel
@@ -292,13 +299,17 @@ class InspectCameraPage(QWidget):
 
         self.config_path_edit = QLineEdit()
         self.config_path_edit.setReadOnly(True)
-        grid.addWidget(QLabel("Saved config"), 0, 0)
+        config_label = QLabel("Saved &config")
+        config_label.setBuddy(self.config_path_edit)
+        grid.addWidget(config_label, 0, 0)
         grid.addWidget(self.config_path_edit, 0, 1)
 
         self.output_dir_row = PathPickerRow("Choose Output Folder...", self._choose_output_dir)
         self.output_dir_edit = self.output_dir_row.line_edit
         self.output_dir_edit.textEdited.connect(self._mark_output_dir_override)
-        grid.addWidget(QLabel("Output folder"), 1, 0)
+        output_label = QLabel("&Output folder")
+        output_label.setBuddy(self.output_dir_edit)
+        grid.addWidget(output_label, 1, 0)
         grid.addWidget(self.output_dir_row, 1, 1)
 
         grid.setColumnStretch(1, 1)
@@ -431,9 +442,22 @@ class InspectCameraPage(QWidget):
         )
         self._inspection_worker.moveToThread(self._inspection_thread)
         self._inspection_thread.started.connect(self._inspection_worker.run)
-        self._inspection_worker.status.connect(lambda message: self._set_feedback(message, ok=True))
-        self._inspection_worker.completed.connect(self._on_inspection_completed)
-        self._inspection_worker.failed.connect(self._on_inspection_failed)
+        self._inspection_worker.status.connect(
+            self._on_inspection_status,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._inspection_worker.completed.connect(
+            self._on_inspection_completed,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._inspection_worker.failed.connect(
+            self._on_inspection_failed,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._inspection_worker.cancelled.connect(
+            self._on_inspection_cancelled,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._inspection_worker.finished.connect(self._inspection_thread.quit)
         self._inspection_worker.finished.connect(self._inspection_worker.deleteLater)
         self._inspection_thread.finished.connect(self._inspection_thread.deleteLater)
@@ -447,9 +471,10 @@ class InspectCameraPage(QWidget):
         else:
             self._set_feedback(f"Output folder does not exist yet: {output_dir}", ok=False)
 
-    def shutdown(self) -> None:
-        self.camera_controller.shutdown()
-        self._stop_inspection_worker()
+    def shutdown(self) -> bool:
+        camera_stopped = self.camera_controller.shutdown()
+        inspection_stopped = self._stop_inspection_worker()
+        return camera_stopped and inspection_stopped
 
     def _choose_output_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Choose output folder", self.output_dir_edit.text().strip())
@@ -528,6 +553,7 @@ class InspectCameraPage(QWidget):
         if self._state == "live_preview":
             self._set_state("idle")
 
+    @Slot(object, object)
     def _on_inspection_completed(self, result: object, output_dir: object) -> None:
         if not isinstance(result, InspectionResult):
             self._set_feedback("Inspection failed: worker returned an invalid result.", ok=False)
@@ -541,10 +567,20 @@ class InspectCameraPage(QWidget):
         self._set_state("result_ready")
         self._set_feedback(f"Camera inspection complete: {result.final_result.value}", ok=ok)
 
+    @Slot(str)
     def _on_inspection_failed(self, message: str) -> None:
         self._set_state("captured_preview")
         self._set_feedback(f"Inspection failed: {message}", ok=False)
         self.operation_state_banner.set_state("Error", f"Inspection failed: {message}", "error", "error")
+
+    @Slot(str)
+    def _on_inspection_cancelled(self, message: str) -> None:
+        self._set_state("cancelling")
+        self._set_feedback(message, ok=True)
+
+    @Slot(str)
+    def _on_inspection_status(self, message: str) -> None:
+        self._set_feedback(message, ok=True)
 
     def _update_summary(self, result: InspectionResult, output_dir: Path) -> None:
         final = result.final_result.value
@@ -581,22 +617,35 @@ class InspectCameraPage(QWidget):
     def _refit_active_preview_if_needed(self) -> None:
         self.result_image_tabs.refit_active_preview_if_needed()
 
-    def _stop_inspection_worker(self) -> None:
-        thread = self._inspection_thread
-        self._inspection_thread = None
-        self._inspection_worker = None
-        if thread is None:
+    def cancel_inspection(self) -> None:
+        worker = self._inspection_worker
+        if worker is None:
             return
+        worker.request_cancel()
+        self._set_state("cancelling")
+        self._set_feedback(
+            "Cancellation requested. Waiting for the current backend operation to finish.",
+            ok=True,
+        )
+
+    def _stop_inspection_worker(self) -> bool:
+        thread = self._inspection_thread
+        if thread is None:
+            return True
+        self.cancel_inspection()
         try:
             if shiboken6.isValid(thread):
-                thread.quit()
-                thread.wait()
+                thread.requestInterruption()
         except RuntimeError:
-            return
+            return True
+        return False
 
+    @Slot()
     def _clear_inspection_refs(self) -> None:
         self._inspection_thread = None
         self._inspection_worker = None
+        if self._state == "cancelling":
+            self._set_state("captured_preview")
 
     def _set_state(self, state: str) -> None:
         self._state = state
@@ -604,6 +653,7 @@ class InspectCameraPage(QWidget):
         live = state == "live_preview"
         captured = state == "captured_preview"
         inspecting = state == "inspecting"
+        cancelling = state == "cancelling"
         result_ready = state == "result_ready"
         controller_state = (
             self.camera_controller.state()
@@ -625,15 +675,16 @@ class InspectCameraPage(QWidget):
         camera_stopping = controller_state == CameraControllerState.STOPPING.value
         camera_ready = controller_state == CameraControllerState.RUNNING.value and self._latest_frame is not None
 
-        self.start_button.setEnabled((idle or result_ready) and camera_can_start and not inspecting)
+        self.start_button.setEnabled((idle or result_ready) and camera_can_start and not inspecting and not cancelling)
         self.stop_button.setEnabled((live or captured or (result_ready and camera_active)) and camera_active and not camera_stopping)
         self.capture_button.setEnabled(live and camera_ready)
         self.retake_button.setEnabled(captured or result_ready)
-        self.inspect_button.setEnabled(captured and self.state.config_path is not None)
-        self.open_output_button.setEnabled(not inspecting)
+        self.inspect_button.setEnabled(captured and self.state.config_path is not None and not cancelling)
+        self.cancel_inspection_button.setEnabled(inspecting)
+        self.open_output_button.setEnabled(not inspecting and not cancelling)
         for widget in (self.camera_index_spin, self.width_spin, self.height_spin):
             widget.setEnabled(idle and controller_state in {CameraControllerState.RELEASED.value, CameraControllerState.FAILED.value})
-        self.output_dir_edit.setEnabled(not inspecting)
+        self.output_dir_edit.setEnabled(not inspecting and not cancelling)
         if result_ready:
             self._show_result_visual()
         else:
@@ -667,6 +718,7 @@ class InspectCameraPage(QWidget):
             self.capture_button,
             self.retake_button,
             self.inspect_button,
+            self.cancel_inspection_button,
             self.open_output_button,
         ):
             set_button_role(button, "secondary")
@@ -709,6 +761,13 @@ class InspectCameraPage(QWidget):
                 self.operation_state_banner.set_state("Ready to inspect", "Inspect the captured frame or retake it.", "captured", "success")
         elif state == "inspecting":
             self.operation_state_banner.set_state("Inspecting", "Running inspection.", "processing", "info")
+        elif state == "cancelling":
+            self.operation_state_banner.set_state(
+                "Cancelling",
+                "Waiting for the current backend operation to finish.",
+                "processing",
+                "info",
+            )
         elif state == "result_ready":
             self.operation_state_banner.set_state("Complete", "Result available. Retake to inspect another frame.", "complete", "success")
         else:

@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 import yaml
 import anomaly_inspection.desktop.runtime as runtime_module
-from PySide6.QtCore import QObject, Qt, Signal, Slot
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+from PySide6.QtGui import QColor, QCloseEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStatusBar,
+    QTableView,
     QWidget,
 )
 
@@ -66,6 +67,7 @@ from anomaly_inspection.desktop.job_paths import (
 from anomaly_inspection.desktop.pages.logs import (
     LOG_MODE_KEY,
     LOG_SOURCE_KEY,
+    LogLoadWorker,
     LogsPage,
     default_logs_output_dir,
     discover_job_history_logs,
@@ -78,7 +80,7 @@ from anomaly_inspection.desktop.pages.logs import (
     row_image_name,
     rows_with_log_metadata,
 )
-from anomaly_inspection.desktop.pages.project_setup import ProjectSetupPage
+from anomaly_inspection.desktop.pages.project_setup import ProjectSetupPage, RuntimePrepareWorker
 from anomaly_inspection.desktop.pages.reference_capture import (
     AspectImageLabel,
     CameraWorker,
@@ -395,6 +397,17 @@ def test_path_picker_row_gets_and_sets_path_text():
     assert row.line_edit.text() == "configs/local.yaml"
     assert row.button.text() == "Browse..."
     assert row.line_edit.minimumWidth() == 0
+
+
+def test_path_picker_row_exposes_accessible_label_and_buddy():
+    app = QApplication.instance() or QApplication([])
+    row = PathPickerRow("Browse...", label_text="&Config path")
+    label = row.findChild(QLabel, "pathPickerLabel")
+
+    assert label is not None
+    assert label.buddy() is row.line_edit
+    assert row.line_edit.accessibleName() == "Config path"
+    assert "Config path" in row.button.accessibleDescription()
 
 
 def test_job_slug_sanitizer_normalizes_names():
@@ -747,6 +760,36 @@ def test_main_window_does_not_create_global_status_bar():
     assert window.findChildren(QStatusBar) == []
 
 
+def test_main_window_defers_close_until_active_work_finishes():
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    class ShutdownStub:
+        def __init__(self, *results):
+            self.results = list(results)
+
+        def shutdown(self):
+            if len(self.results) > 1:
+                return self.results.pop(0)
+            return self.results[0]
+
+    window._reference_capture_page = ShutdownStub(True)
+    window._project_setup_page = ShutdownStub(False, True)
+    window._inspect_image_page = ShutdownStub(True)
+    window._inspect_camera_page = ShutdownStub(True)
+    window._logs_page = ShutdownStub(True)
+
+    first_event = QCloseEvent()
+    window.closeEvent(first_event)
+
+    assert first_event.isAccepted() is False
+    assert window._close_pending is True
+    assert window._close_retry_timer.isActive() is True
+
+    window._close_retry_timer.stop()
+    assert window._project_setup_page.shutdown() is True
+
+
 def test_desktop_pages_do_not_repeat_body_page_headers():
     app = QApplication.instance() or QApplication([])
     window = MainWindow(AppState())
@@ -986,6 +1029,53 @@ def test_inspection_worker_uses_prepared_runtime_when_available(tmp_path):
     assert completed[0][0].inspection_mode == "image"
 
 
+def test_inspection_worker_cancel_before_start_discards_work(tmp_path):
+    worker = InspectionWorker(tmp_path / "config.yaml", tmp_path / "image.png", tmp_path / "output")
+    cancelled = []
+    completed = []
+    failed = []
+    finished = []
+    worker.cancelled.connect(cancelled.append)
+    worker.completed.connect(lambda *args: completed.append(args))
+    worker.failed.connect(failed.append)
+    worker.finished.connect(lambda: finished.append(True))
+
+    worker.request_cancel()
+    worker.run()
+
+    assert cancelled == ["Inspection cancelled before it started."]
+    assert completed == []
+    assert failed == []
+    assert finished == [True]
+    assert (tmp_path / "output").exists() is False
+
+
+def test_runtime_prepare_worker_cancel_before_start_does_not_prepare(tmp_path):
+    class FakeRuntimeManager:
+        def __init__(self):
+            self.prepare_calls = []
+
+        def prepare(self, path):
+            self.prepare_calls.append(path)
+
+        def clear(self):
+            raise AssertionError("clear should not be needed before preparation starts")
+
+    manager = FakeRuntimeManager()
+    worker = RuntimePrepareWorker(manager, tmp_path / "config.yaml")
+    cancelled = []
+    finished = []
+    worker.cancelled.connect(cancelled.append)
+    worker.finished.connect(lambda: finished.append(True))
+
+    worker.request_cancel()
+    worker.run()
+
+    assert manager.prepare_calls == []
+    assert cancelled == ["Runtime preparation cancelled before it started."]
+    assert finished == [True]
+
+
 def test_project_setup_page_uses_shared_ui_components():
     app = QApplication.instance() or QApplication([])
     page = ProjectSetupPage(AppState())
@@ -1066,6 +1156,15 @@ def test_project_setup_prepare_runtime_is_primary_only_when_action_is_needed():
     manager.mark_stale()
     page._refresh_runtime_status()
     assert page.prepare_runtime_button.property("buttonRole") == "primary"
+
+
+def test_project_setup_explains_show_images_is_for_cli_runs():
+    app = QApplication.instance() or QApplication([])
+    page = ProjectSetupPage(AppState())
+
+    assert page.show_images_checkbox.text() == "Show images in CLI runs"
+    assert "Desktop inspections" in page.show_images_checkbox.toolTip()
+    assert page.show_images_checkbox.accessibleDescription() == page.show_images_checkbox.toolTip()
 
 
 def test_project_setup_updates_app_state_job_name_and_slug():
@@ -1417,6 +1516,36 @@ def process_qt_events(app: QApplication, iterations: int = 3) -> None:
         app.processEvents()
 
 
+def finish_log_operation(page: LogsPage, app: QApplication) -> None:
+    thread = page._load_thread
+    assert thread is not None
+    for _ in range(2000):
+        app.processEvents()
+        if thread.isFinished():
+            break
+        QThread.msleep(1)
+    assert thread.isFinished() is True
+    process_qt_events(app, iterations=10)
+    assert page._load_thread is None
+
+
+def shutdown_camera_controller(controller: CameraController, app: QApplication) -> None:
+    worker = controller._worker
+    thread = controller._thread
+    controller.shutdown()
+    if worker is not None:
+        worker.finished.emit(controller.session_id())
+    process_qt_events(app, iterations=10)
+    if thread is not None:
+        try:
+            thread.quit()
+            assert thread.wait(1000) is True
+        except RuntimeError:
+            pass
+    process_qt_events(app, iterations=10)
+    assert controller.shutdown() is True
+
+
 def make_camera_controller(app: QApplication) -> CameraController:
     FakeControllerWorker.instances.clear()
     controller = CameraController(
@@ -1440,7 +1569,7 @@ def test_camera_controller_start_creates_one_worker_and_coalesces_repeated_start
     assert FakeControllerWorker.instances[0].kwargs["blank_max_value"] == 2
     assert FakeControllerWorker.instances[0].kwargs["blank_mean_max"] == 1.0
 
-    controller.shutdown()
+    shutdown_camera_controller(controller, app)
     process_qt_events(app)
 
 
@@ -1462,7 +1591,7 @@ def test_camera_controller_soft_stop_resume_does_not_reopen_worker():
     assert len(FakeControllerWorker.instances) == 1
     assert len(frames) == 1
 
-    controller.shutdown()
+    shutdown_camera_controller(controller, app)
     process_qt_events(app)
 
 
@@ -1474,12 +1603,20 @@ def test_camera_controller_idle_release_hard_stops_worker():
     controller.start_preview()
     process_qt_events(app)
     worker = FakeControllerWorker.instances[-1]
+    thread = controller._thread
     controller._on_worker_frame_ready(controller.session_id(), frame)
     controller.stop_preview()
     controller._release_idle_worker()
-    process_qt_events(app)
+    worker.finished.emit(controller.session_id())
+    process_qt_events(app, iterations=10)
+    if thread is not None:
+        try:
+            thread.quit()
+            assert thread.wait(1000) is True
+        except RuntimeError:
+            pass
 
-    assert worker.stop_count == 1
+    assert worker.kwargs["stop_event"].is_set() is True
     assert controller.state() == CameraControllerState.RELEASED.value
     assert controller.has_active_worker() is False
 
@@ -1491,10 +1628,18 @@ def test_camera_controller_stop_during_opening_cancels_worker():
     controller.start_preview()
     process_qt_events(app)
     worker = FakeControllerWorker.instances[-1]
+    thread = controller._thread
     controller.stop_preview()
-    process_qt_events(app)
+    worker.finished.emit(controller.session_id())
+    process_qt_events(app, iterations=10)
+    if thread is not None:
+        try:
+            thread.quit()
+            assert thread.wait(1000) is True
+        except RuntimeError:
+            pass
 
-    assert worker.stop_count == 1
+    assert worker.kwargs["stop_event"].is_set() is True
     assert controller.state() == CameraControllerState.RELEASED.value
     assert controller.has_active_worker() is False
 
@@ -1511,7 +1656,7 @@ def test_camera_controller_start_while_warming_does_not_duplicate_worker():
     assert controller.state() == CameraControllerState.WARMING.value
     assert len(FakeControllerWorker.instances) == 1
 
-    controller.shutdown()
+    shutdown_camera_controller(controller, app)
     process_qt_events(app)
 
 
@@ -1534,7 +1679,7 @@ def test_camera_controller_ignores_frames_while_soft_stopped_and_stale_frames():
     assert len(frames) == 1
     assert frames[0] is frame
 
-    controller.shutdown()
+    shutdown_camera_controller(controller, app)
     process_qt_events(app)
 
 
@@ -1548,6 +1693,7 @@ def test_camera_controller_error_and_finished_route_by_session():
 
     controller.start_preview()
     process_qt_events(app)
+    thread = controller._thread
     session_id = controller.session_id()
     controller._on_worker_error(session_id - 1, "stale error")
     controller._on_worker_finished(session_id - 1)
@@ -1558,6 +1704,9 @@ def test_camera_controller_error_and_finished_route_by_session():
     assert stopped == [True]
     assert controller.state() == CameraControllerState.FAILED.value
     assert controller.has_active_worker() is False
+    if thread is not None:
+        thread.quit()
+        assert thread.wait(1000) is True
 
 
 def test_normalize_reference_output_path_appends_png_extension():
@@ -2809,6 +2958,7 @@ def test_inspect_camera_inspects_preserved_capture_after_preview_stop(tmp_path, 
     class FakeInspectionWorker(QObject):
         completed = Signal(object, object)
         failed = Signal(str)
+        cancelled = Signal(str)
         status = Signal(str)
         finished = Signal()
 
@@ -2833,6 +2983,9 @@ def test_inspect_camera_inspects_preserved_capture_after_preview_stop(tmp_path, 
 
         def run(self):
             self.finished.emit()
+
+        def request_cancel(self):
+            self.cancelled.emit("Cancelled")
 
     monkeypatch.setattr(camera_page_module, "QThread", ImmediateThread)
     monkeypatch.setattr(camera_page_module, "InspectionWorker", FakeInspectionWorker)
@@ -2962,6 +3115,53 @@ def test_inspect_image_shutdown_is_safe_when_no_thread_exists():
     assert page._worker is None
 
 
+def test_inspection_page_worker_slots_have_gui_thread_affinity():
+    app = QApplication.instance() or QApplication([])
+    image_page = InspectImagePage(AppState())
+    camera_page = InspectCameraPage(AppState())
+    observed_threads = []
+
+    class StatusEmitter(QObject):
+        status = Signal(str)
+        finished = Signal()
+
+        @Slot()
+        def run(self):
+            self.status.emit("Worker status")
+            self.finished.emit()
+
+    emitter = StatusEmitter()
+    thread = QThread()
+    emitter.moveToThread(thread)
+    original_image_feedback = image_page._set_feedback
+    original_camera_feedback = camera_page._set_feedback
+
+    def record_image_feedback(message, ok):
+        observed_threads.append(QThread.currentThread())
+        original_image_feedback(message, ok)
+
+    def record_camera_feedback(message, ok):
+        observed_threads.append(QThread.currentThread())
+        original_camera_feedback(message, ok)
+
+    image_page._set_feedback = record_image_feedback
+    camera_page._set_feedback = record_camera_feedback
+    emitter.status.connect(image_page._on_worker_status, Qt.ConnectionType.QueuedConnection)
+    emitter.status.connect(camera_page._on_inspection_status, Qt.ConnectionType.QueuedConnection)
+    emitter.finished.connect(emitter.deleteLater)
+    emitter.finished.connect(thread.quit)
+    thread.started.connect(emitter.run)
+    thread.start()
+    for _ in range(1000):
+        app.processEvents()
+        if thread.isFinished() and len(observed_threads) == 2:
+            break
+        QThread.msleep(1)
+
+    assert observed_threads == [app.thread(), app.thread()]
+    assert thread.wait(1000) is True
+
+
 def write_synthetic_log(path: Path, rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
@@ -3071,6 +3271,23 @@ def test_load_inspection_log_rejects_missing_required_columns(tmp_path):
         assert "missing required column" in str(exc)
     else:
         raise AssertionError("Expected unsupported CSV schema to be rejected.")
+
+
+def test_log_load_worker_cancel_before_start_avoids_file_io(tmp_path):
+    worker = LogLoadWorker("csv", tmp_path / "missing.csv")
+    cancelled = []
+    failed = []
+    finished = []
+    worker.cancelled.connect(cancelled.append)
+    worker.failed.connect(failed.append)
+    worker.finished.connect(lambda: finished.append(True))
+
+    worker.request_cancel()
+    worker.run()
+
+    assert cancelled == ["Log loading cancelled."]
+    assert failed == []
+    assert finished == [True]
 
 
 def test_find_log_files_finds_known_project_logs(tmp_path):
@@ -3243,6 +3460,7 @@ def test_logs_page_constructs_with_expected_controls():
     assert isinstance(page.feedback_label, StatusBanner)
     assert isinstance(page.review_feedback_label, StatusBanner)
     assert isinstance(page.result_image_tabs, ResultImageTabs)
+    assert isinstance(page.records_table, QTableView)
     assert page.result_filter_combo.count() == 5
     assert page.mode_filter_combo.count() == 4
     assert page.load_job_history_button.text() == "Load Job History"
@@ -3267,7 +3485,7 @@ def test_logs_records_table_uses_balanced_column_resize_modes():
     page = LogsPage(AppState())
     header = page.records_table.horizontalHeader()
 
-    assert page.records_table.columnCount() == 7
+    assert page.records_proxy_model.columnCount() == 7
     assert header.sectionResizeMode(0) == QHeaderView.ResizeMode.Fixed
     assert header.sectionResizeMode(1) == QHeaderView.ResizeMode.Fixed
     assert header.sectionResizeMode(2) == QHeaderView.ResizeMode.Fixed
@@ -3282,7 +3500,7 @@ def test_logs_records_table_uses_theme_styles():
     page = LogsPage(AppState())
     stylesheet = build_app_stylesheet()
 
-    assert "QTableWidget#recordsTable" in stylesheet
+    assert "QTableView#recordsTable" in stylesheet
     assert "selection-background-color" in stylesheet
     assert "QSplitter#referenceCaptureWorkspace" in stylesheet
     assert "QSplitter#zoneEditorWorkspace" in stylesheet
@@ -3299,19 +3517,20 @@ def test_logs_records_table_uses_theme_styles():
 def test_logs_records_table_populates_with_column_alignment(tmp_path):
     app = QApplication.instance() or QApplication([])
     page = LogsPage(AppState())
-    page._filtered_rows = rows_with_log_metadata(synthetic_log_rows(tmp_path), tmp_path / "camera" / "inspection_log.csv", "Camera")
+    page._rows = rows_with_log_metadata(synthetic_log_rows(tmp_path), tmp_path / "camera" / "inspection_log.csv", "Camera")
 
-    page._populate_table()
+    page._set_model_rows()
 
-    assert page.records_table.rowCount() == 2
-    assert page.records_table.item(0, 1).text() == "Camera"
-    assert page.records_table.item(0, 2).text() == "OK"
-    assert page.records_table.item(0, 3).text() == "ok.png"
-    assert page.records_table.item(0, 4).text() == "Part present"
-    assert page.records_table.item(0, 5).text() == "0.1"
-    assert page.records_table.item(0, 6).text() == "15 ms"
-    assert page.records_table.item(0, 2).textAlignment() == (Qt.AlignmentFlag.AlignCenter)
-    assert page.records_table.item(0, 5).textAlignment() == (
+    model = page.records_proxy_model
+    assert model.rowCount() == 2
+    assert model.data(model.index(0, 1)) == "Camera"
+    assert model.data(model.index(0, 2)) == "OK"
+    assert model.data(model.index(0, 3)) == "ok.png"
+    assert model.data(model.index(0, 4)) == "Part present"
+    assert model.data(model.index(0, 5)) == "0.1"
+    assert model.data(model.index(0, 6)) == "15 ms"
+    assert model.data(model.index(0, 2), Qt.ItemDataRole.TextAlignmentRole) == Qt.AlignmentFlag.AlignCenter
+    assert model.data(model.index(0, 5), Qt.ItemDataRole.TextAlignmentRole) == (
         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
     )
 
@@ -3445,11 +3664,12 @@ def test_logs_page_single_csv_load_infers_mode_and_keeps_workflow(tmp_path):
     page.csv_path_edit.setText(str(log_path))
 
     page.load_current_csv()
+    finish_log_operation(page, app)
 
     assert len(page._rows) == 1
     assert page._rows[0][LOG_MODE_KEY] == "Camera"
     assert page._rows[0][LOG_SOURCE_KEY] == str(log_path)
-    assert page.records_table.rowCount() == 1
+    assert page.records_proxy_model.rowCount() == 1
 
 
 def test_logs_page_load_job_history_combines_records(tmp_path):
@@ -3464,10 +3684,11 @@ def test_logs_page_load_job_history_combines_records(tmp_path):
     page.output_folder_edit.setText(str(tmp_path))
 
     page.load_job_history()
+    finish_log_operation(page, app)
 
     assert len(page._rows) == 3
     assert [row[LOG_MODE_KEY] for row in page._rows] == ["Image", "Folder", "Camera"]
-    assert page.records_table.rowCount() == 3
+    assert page.records_proxy_model.rowCount() == 3
 
 
 def test_logs_page_mode_filter_applies_to_loaded_records(tmp_path):
@@ -3477,6 +3698,7 @@ def test_logs_page_mode_filter_applies_to_loaded_records(tmp_path):
     page._rows.extend(rows_with_log_metadata([synthetic_log_rows(tmp_path)[1]], tmp_path / "folder" / "run_1" / "summary.csv", "Folder"))
 
     page.mode_filter_combo.setCurrentText("Folder")
-    page.apply_filters()
+    page._set_model_rows()
 
-    assert [row[LOG_MODE_KEY] for row in page._filtered_rows] == ["Folder"]
+    assert page.records_proxy_model.rowCount() == 1
+    assert page._current_row()[LOG_MODE_KEY] == "Folder"

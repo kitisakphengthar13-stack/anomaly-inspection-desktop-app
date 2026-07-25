@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event
 from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
@@ -56,21 +57,37 @@ SAMPLE_ZONES_PATH = Path("path/to/zones.json")
 class RuntimePrepareWorker(QObject):
     completed = Signal()
     failed = Signal(str)
+    cancelled = Signal(str)
     finished = Signal()
 
     def __init__(self, runtime_manager: PreparedRuntimeManager, config_path: Path) -> None:
         super().__init__()
         self.runtime_manager = runtime_manager
         self.config_path = config_path
+        self._cancel_requested = Event()
+
+    def request_cancel(self) -> None:
+        self._cancel_requested.set()
 
     @Slot()
     def run(self) -> None:
         try:
+            if self._cancel_requested.is_set():
+                self.cancelled.emit("Runtime preparation cancelled before it started.")
+                return
             self.runtime_manager.prepare(self.config_path)
-            self.completed.emit()
+            if self._cancel_requested.is_set():
+                self.runtime_manager.clear()
+                self.cancelled.emit("Runtime preparation cancelled. The loaded runtime was discarded.")
+            else:
+                self.completed.emit()
         except Exception as exc:
-            self.runtime_manager.set_error(str(exc))
-            self.failed.emit(str(exc))
+            if self._cancel_requested.is_set():
+                self.runtime_manager.clear()
+                self.cancelled.emit("Runtime preparation cancelled.")
+            else:
+                self.runtime_manager.set_error(str(exc))
+                self.failed.emit(str(exc))
         finally:
             self.finished.emit()
 
@@ -238,6 +255,10 @@ class ProjectSetupPage(QWidget):
         set_button_icon(self.prepare_runtime_button, "run")
         self.prepare_runtime_button.clicked.connect(self.prepare_runtime)
         row_layout.addWidget(self.prepare_runtime_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.cancel_runtime_button = set_button_role(QPushButton("Cancel"), "secondary")
+        self.cancel_runtime_button.setEnabled(False)
+        self.cancel_runtime_button.clicked.connect(self.cancel_runtime_preparation)
+        row_layout.addWidget(self.cancel_runtime_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._refresh_runtime_status()
         return runtime_row
@@ -337,7 +358,12 @@ class ProjectSetupPage(QWidget):
         self.save_heatmap_checkbox = QCheckBox("Save heatmap")
         self.save_presence_mask_checkbox = QCheckBox("Save presence mask")
         self.organize_by_result_checkbox = QCheckBox("Organize by result")
-        self.show_images_checkbox = QCheckBox("Show images after inspection")
+        self.show_images_checkbox = QCheckBox("Show images in CLI runs")
+        self.show_images_checkbox.setToolTip(
+            "Desktop inspections always render results in this application. "
+            "This setting controls whether CLI runs open external image windows."
+        )
+        self.show_images_checkbox.setAccessibleDescription(self.show_images_checkbox.toolTip())
         self.save_csv_log_checkbox = QCheckBox("Save CSV inspection log")
 
         grid = QGridLayout()
@@ -555,6 +581,7 @@ class ProjectSetupPage(QWidget):
         self.runtime_manager.mark_preparing()
         self._refresh_runtime_status()
         self.prepare_runtime_button.setEnabled(False)
+        self.cancel_runtime_button.setEnabled(True)
         self.state.status_message = "Preparing runtime..."
         if self._status_callback:
             self._status_callback("Preparing runtime...")
@@ -562,14 +589,30 @@ class ProjectSetupPage(QWidget):
         self._runtime_worker = RuntimePrepareWorker(self.runtime_manager, config_path)
         self._runtime_worker.moveToThread(self._runtime_thread)
         self._runtime_thread.started.connect(self._runtime_worker.run)
-        self._runtime_worker.completed.connect(self._on_runtime_prepared)
-        self._runtime_worker.failed.connect(self._on_runtime_prepare_failed)
+        self._runtime_worker.completed.connect(self._on_runtime_prepared, Qt.ConnectionType.QueuedConnection)
+        self._runtime_worker.failed.connect(self._on_runtime_prepare_failed, Qt.ConnectionType.QueuedConnection)
+        self._runtime_worker.cancelled.connect(self._on_runtime_prepare_cancelled, Qt.ConnectionType.QueuedConnection)
         self._runtime_worker.finished.connect(self._runtime_thread.quit)
         self._runtime_worker.finished.connect(self._runtime_worker.deleteLater)
         self._runtime_thread.finished.connect(self._runtime_thread.deleteLater)
         self._runtime_thread.finished.connect(self._clear_runtime_worker)
         self._runtime_thread.start()
 
+    def cancel_runtime_preparation(self) -> None:
+        worker = self._runtime_worker
+        if worker is None:
+            return
+        worker.request_cancel()
+        self.cancel_runtime_button.setEnabled(False)
+        self.runtime_banner.set_state(
+            "Cancelling",
+            "Waiting for the current model-loading operation to finish.",
+            "processing",
+            "info",
+        )
+        self.state.status_message = "Runtime cancellation requested."
+
+    @Slot()
     def _on_runtime_prepared(self) -> None:
         self._refresh_runtime_status()
         message = "Runtime ready. Model backend is prepared for inspection."
@@ -577,14 +620,21 @@ class ProjectSetupPage(QWidget):
         if self._status_callback:
             self._status_callback(message)
 
+    @Slot(str)
     def _on_runtime_prepare_failed(self, message: str) -> None:
         self._refresh_runtime_status()
         self._set_feedback(f"Runtime preparation failed: {message}", ok=False)
+
+    @Slot(str)
+    def _on_runtime_prepare_cancelled(self, message: str) -> None:
+        self._set_feedback(message, ok=True)
+        self._refresh_runtime_status()
 
     def _clear_runtime_worker(self) -> None:
         self._runtime_thread = None
         self._runtime_worker = None
         self.prepare_runtime_button.setEnabled(True)
+        self.cancel_runtime_button.setEnabled(False)
         self._refresh_runtime_status()
 
     def _mark_runtime_stale(self) -> None:
@@ -617,14 +667,15 @@ class ProjectSetupPage(QWidget):
             self.runtime_banner.set_state("Not prepared", "Prepare runtime to reduce first inspection latency.", "idle", "info")
             set_button_role(self.prepare_runtime_button, "primary")
 
-    def shutdown(self) -> None:
-        thread = self._runtime_thread
-        if thread is None:
-            return
-        thread.quit()
-        thread.wait()
-        self._runtime_thread = None
-        self._runtime_worker = None
+    def shutdown(self) -> bool:
+        if self._runtime_thread is None:
+            return True
+        self.cancel_runtime_preparation()
+        try:
+            self._runtime_thread.requestInterruption()
+        except RuntimeError:
+            return True
+        return False
 
     def _update_inspection_job_state(self, value: str) -> None:
         old_reference_auto = self.state.reference_path_auto

@@ -905,7 +905,7 @@ def build_app_stylesheet(theme: InspectionTheme | None = None) -> str:
         color: {p.text_secondary};
         border: 1px solid {p.border_strong};
     }}
-    QTableWidget#recordsTable {{
+    QTableView#recordsTable {{
         background: {p.surface_elevated};
         alternate-background-color: {p.table_alternate};
         color: {p.table_text};
@@ -913,11 +913,11 @@ def build_app_stylesheet(theme: InspectionTheme | None = None) -> str:
         selection-background-color: {p.selection};
         selection-color: {p.selection_text};
     }}
-    QTableWidget#recordsTable::item {{
+    QTableView#recordsTable::item {{
         padding: 4px 8px;
         border: 0;
     }}
-    QTableWidget#recordsTable::item:selected {{
+    QTableView#recordsTable::item:selected {{
         background: {p.selection};
         color: {p.selection_text};
     }}

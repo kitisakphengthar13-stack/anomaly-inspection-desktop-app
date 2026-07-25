@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
 from typing import Callable
 
 import shiboken6
@@ -75,6 +76,7 @@ def inspection_csv_log_path(result: InspectionResult, output_dir: str | Path) ->
 class InspectionWorker(QObject):
     completed = Signal(object, object)
     failed = Signal(str)
+    cancelled = Signal(str)
     status = Signal(str)
     finished = Signal()
 
@@ -92,10 +94,20 @@ class InspectionWorker(QObject):
         self.output_dir = output_dir
         self.inspection_mode = inspection_mode
         self.runtime_manager = runtime_manager
+        self._cancel_requested = Event()
+
+    def request_cancel(self) -> None:
+        self._cancel_requested.set()
+
+    def is_cancel_requested(self) -> bool:
+        return self._cancel_requested.is_set()
 
     @Slot()
     def run(self) -> None:
         try:
+            if self.is_cancel_requested():
+                self.cancelled.emit("Inspection cancelled before it started.")
+                return
             self.output_dir.mkdir(parents=True, exist_ok=True)
             if self.runtime_manager is not None:
                 self.status.emit("Inspecting image with prepared runtime..." if self.runtime_manager.is_current(self.config_path) else "Loading runtime on demand...")
@@ -113,9 +125,15 @@ class InspectionWorker(QObject):
                 pipeline = InspectionPipeline(config)
                 self.status.emit("Inspecting image...")
                 result = pipeline.inspect_image(self.image_path, self.output_dir, inspection_mode=self.inspection_mode)
-            self.completed.emit(result, self.output_dir)
+            if self.is_cancel_requested():
+                self.cancelled.emit("Inspection cancelled. The completed backend result was discarded.")
+            else:
+                self.completed.emit(result, self.output_dir)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            if self.is_cancel_requested():
+                self.cancelled.emit("Inspection cancelled.")
+            else:
+                self.failed.emit(str(exc))
         finally:
             self.finished.emit()
 
@@ -192,7 +210,9 @@ class InspectImagePage(QWidget):
         self.image_path_row = PathPickerRow("Browse Image...", self._browse_image)
         self.image_path_edit = self.image_path_row.line_edit
         self.image_path_edit.textChanged.connect(lambda _text: self._refresh_operation_state())
-        grid.addWidget(QLabel("Image"), 0, 0)
+        image_label = QLabel("&Image")
+        image_label.setBuddy(self.image_path_edit)
+        grid.addWidget(image_label, 0, 0)
         grid.addWidget(self.image_path_row, 0, 1)
         grid.setColumnStretch(1, 1)
         panel.content_layout.addLayout(grid)
@@ -206,8 +226,11 @@ class InspectImagePage(QWidget):
         self.run_button = set_button_role(QPushButton("Run Inspection"), "primary")
         set_button_icon(self.run_button, "run")
         self.run_button.clicked.connect(self.run_inspection)
+        self.cancel_button = set_button_role(QPushButton("Cancel"), "secondary")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.cancel_inspection)
         action_section = ActionSection(rows=1)
-        action_section.add_row((self.run_button,), align_right=True)
+        action_section.add_row((self.cancel_button, self.run_button), align_right=True)
         panel.content_layout.addWidget(action_section)
         panel.content_layout.addWidget(self.feedback_label)
         return panel
@@ -222,13 +245,17 @@ class InspectImagePage(QWidget):
 
         self.config_path_edit = QLineEdit()
         self.config_path_edit.setReadOnly(True)
-        grid.addWidget(QLabel("Saved config"), 0, 0)
+        config_label = QLabel("Saved &config")
+        config_label.setBuddy(self.config_path_edit)
+        grid.addWidget(config_label, 0, 0)
         grid.addWidget(self.config_path_edit, 0, 1)
 
         self.output_dir_row = PathPickerRow("Choose Output Folder...", self._choose_output_dir)
         self.output_dir_edit = self.output_dir_row.line_edit
         self.output_dir_edit.textEdited.connect(self._mark_output_dir_override)
-        grid.addWidget(QLabel("Output folder"), 1, 0)
+        output_label = QLabel("&Output folder")
+        output_label.setBuddy(self.output_dir_edit)
+        grid.addWidget(output_label, 1, 0)
         grid.addWidget(self.output_dir_row, 1, 1)
 
         self.open_output_button = set_button_role(QPushButton("Open Output Folder"), "secondary")
@@ -299,14 +326,14 @@ class InspectImagePage(QWidget):
         self._worker = InspectionWorker(config_path, image_path, output_dir, runtime_manager=self.runtime_manager)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
-        self._worker.status.connect(lambda message: self._set_feedback(message, ok=True))
-        self._worker.completed.connect(self._on_completed)
-        self._worker.failed.connect(self._on_failed)
+        self._worker.status.connect(self._on_worker_status, Qt.ConnectionType.QueuedConnection)
+        self._worker.completed.connect(self._on_completed, Qt.ConnectionType.QueuedConnection)
+        self._worker.failed.connect(self._on_failed, Qt.ConnectionType.QueuedConnection)
+        self._worker.cancelled.connect(self._on_cancelled, Qt.ConnectionType.QueuedConnection)
         self._worker.finished.connect(self._thread.quit)
         self._worker.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._thread.deleteLater)
-        self._thread.finished.connect(lambda: self._set_running(False))
-        self._thread.finished.connect(self._clear_thread_refs)
+        self._thread.finished.connect(self._on_worker_thread_finished, Qt.ConnectionType.QueuedConnection)
         self._thread.start()
 
     def open_output_folder(self) -> None:
@@ -335,6 +362,7 @@ class InspectImagePage(QWidget):
         self.state.image_output_dir = Path(text) if text else None
         self._refresh_operation_state()
 
+    @Slot(object, object)
     def _on_completed(self, result: object, output_dir: object) -> None:
         if not isinstance(result, InspectionResult):
             self._set_feedback("Inspection failed: worker returned an invalid result.", ok=False)
@@ -351,9 +379,24 @@ class InspectImagePage(QWidget):
             "complete",
         )
 
+    @Slot(str)
     def _on_failed(self, message: str) -> None:
         self._set_feedback(f"Inspection failed: {message}", ok=False)
         self._set_operation_state("Blocked", f"Inspection failed: {message}", "error", "blocked")
+
+    @Slot(str)
+    def _on_cancelled(self, message: str) -> None:
+        self._set_feedback(message, ok=True)
+        self._set_operation_state("Cancelled", message, "info", "cancelled")
+
+    @Slot(str)
+    def _on_worker_status(self, message: str) -> None:
+        self._set_feedback(message, ok=True)
+
+    @Slot()
+    def _on_worker_thread_finished(self) -> None:
+        self._set_running(False)
+        self._clear_thread_refs()
 
     def _update_summary(self, result: InspectionResult, output_dir: Path) -> None:
         final = result.final_result.value
@@ -392,24 +435,32 @@ class InspectImagePage(QWidget):
 
     def _set_running(self, running: bool) -> None:
         self.run_button.setEnabled(not running)
+        self.cancel_button.setEnabled(running)
         if running:
             self._set_operation_state("Inspecting", "Running inspection", "info", "processing")
-        elif self._operation_state_key == "inspecting":
+        elif self._operation_state_key == "processing":
             self._refresh_operation_state()
 
-    def shutdown(self) -> None:
-        thread = self._thread
-        if thread is None:
+    def cancel_inspection(self) -> None:
+        worker = self._worker
+        if worker is None:
             return
-        self._thread = None
-        self._worker = None
+        worker.request_cancel()
+        self.cancel_button.setEnabled(False)
+        message = "Cancellation requested. Waiting for the current backend operation to finish."
+        self._set_feedback(message, ok=True)
+        self._set_operation_state("Cancelling", message, "info", "cancelling")
+
+    def shutdown(self) -> bool:
+        if self._thread is None:
+            return True
+        self.cancel_inspection()
         try:
-            if not shiboken6.isValid(thread):
-                return
-            thread.quit()
-            thread.wait()
+            if shiboken6.isValid(self._thread):
+                self._thread.requestInterruption()
         except RuntimeError:
-            return
+            return True
+        return False
 
     def _clear_thread_refs(self) -> None:
         self._thread = None

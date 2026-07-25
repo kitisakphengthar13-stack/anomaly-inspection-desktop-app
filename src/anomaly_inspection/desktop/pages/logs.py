@@ -3,9 +3,20 @@ from __future__ import annotations
 import csv
 from datetime import datetime
 from pathlib import Path
+from threading import Event
 from typing import Callable
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QModelIndex,
+    QObject,
+    QSortFilterProxyModel,
+    QThread,
+    Qt,
+    QUrl,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -23,8 +34,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSplitter,
-    QTableWidget,
-    QTableWidgetItem,
+    QTableView,
     QVBoxLayout,
     QWidget,
 )
@@ -257,13 +267,135 @@ def _table_alignment_for_column(key: str) -> Qt.AlignmentFlag:
     return Qt.AlignmentFlag.AlignCenter
 
 
+class InspectionLogTableModel(QAbstractTableModel):
+    def __init__(self, rows: list[dict[str, str]] | None = None, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._rows = list(rows or [])
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # type: ignore[override]
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:  # type: ignore[override]
+        return 0 if parent.isValid() else len(TABLE_COLUMNS)
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):  # type: ignore[override]
+        if not index.isValid() or not (0 <= index.row() < len(self._rows)):
+            return None
+        key, _ = TABLE_COLUMNS[index.column()]
+        row = self._rows[index.row()]
+        raw_value = row_image_name(row) if key == "image_name" else row.get(key, "")
+        value = raw_value if key in {"timestamp", LOG_MODE_KEY, "image_name"} else format_log_value(key, raw_value)
+        if role == Qt.ItemDataRole.DisplayRole:
+            return value
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return raw_value if raw_value == value else f"{value} (raw: {raw_value})"
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            return _table_alignment_for_column(key)
+        return None
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):  # type: ignore[override]
+        if role != Qt.ItemDataRole.DisplayRole:
+            return None
+        if orientation == Qt.Orientation.Horizontal and 0 <= section < len(TABLE_COLUMNS):
+            return TABLE_COLUMNS[section][1]
+        return section + 1
+
+    def set_rows(self, rows: list[dict[str, str]]) -> None:
+        self.beginResetModel()
+        self._rows = list(rows)
+        self.endResetModel()
+
+    def row_at(self, row_index: int) -> dict[str, str] | None:
+        if 0 <= row_index < len(self._rows):
+            return self._rows[row_index]
+        return None
+
+
+class InspectionLogFilterProxyModel(QSortFilterProxyModel):
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.result_filter = "All"
+        self.mode_filter = "All Modes"
+        self.search_text = ""
+        self.errors_only = False
+
+    def set_filters(self, result_filter: str, mode_filter: str, search_text: str, errors_only: bool) -> None:
+        self.beginFilterChange()
+        self.result_filter = result_filter
+        self.mode_filter = mode_filter
+        self.search_text = search_text.strip().lower()
+        self.errors_only = errors_only
+        self.endFilterChange(QSortFilterProxyModel.Direction.Rows)
+
+    def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:  # type: ignore[override]
+        source_model = self.sourceModel()
+        if not isinstance(source_model, InspectionLogTableModel):
+            return True
+        row = source_model.row_at(source_row)
+        if row is None:
+            return False
+        if self.mode_filter != "All Modes" and row.get(LOG_MODE_KEY, "Log") != self.mode_filter:
+            return False
+        if self.result_filter != "All" and row.get("final_result", "") != self.result_filter:
+            return False
+        if self.errors_only and not row.get("error_message", "").strip():
+            return False
+        if self.search_text:
+            haystack = f"{row_image_name(row)} {row.get('image_path', '')}".lower()
+            if self.search_text not in haystack:
+                return False
+        return True
+
+
+class LogLoadWorker(QObject):
+    completed = Signal(str, object, object)
+    failed = Signal(str)
+    cancelled = Signal(str)
+    finished = Signal()
+
+    def __init__(self, operation: str, path: Path) -> None:
+        super().__init__()
+        self.operation = operation
+        self.path = path
+        self._cancel_requested = Event()
+
+    def request_cancel(self) -> None:
+        self._cancel_requested.set()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            if self._cancel_requested.is_set():
+                self.cancelled.emit("Log loading cancelled.")
+                return
+            if self.operation == "find":
+                payload = find_log_files(self.path)
+            elif self.operation == "csv":
+                rows, _ = load_inspection_log(self.path)
+                payload = rows_with_log_metadata(rows, self.path, infer_log_mode(self.path))
+            elif self.operation == "history":
+                payload = load_job_history_rows(self.path)
+            else:
+                raise ValueError(f"Unsupported log operation: {self.operation}")
+            if self._cancel_requested.is_set():
+                self.cancelled.emit("Log loading cancelled. Loaded data was discarded.")
+            else:
+                self.completed.emit(self.operation, self.path, payload)
+        except Exception as exc:
+            if self._cancel_requested.is_set():
+                self.cancelled.emit("Log loading cancelled.")
+            else:
+                self.failed.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+
 class LogsPage(QWidget):
     def __init__(self, state: AppState, status_callback: StatusCallback | None = None) -> None:
         super().__init__()
         self.state = state
         self._status_callback = status_callback
         self._rows: list[dict[str, str]] = []
-        self._filtered_rows: list[dict[str, str]] = []
         self._current_csv_path: Path | None = None
         self._current_source_paths: list[Path] = []
         self._detail_widgets: dict[str, QLabel | QPlainTextEdit] = {}
@@ -271,6 +403,8 @@ class LogsPage(QWidget):
         self._error_label: QLabel | None = None
         self._error_text: QPlainTextEdit | None = None
         self._has_selected_record = False
+        self._load_thread: QThread | None = None
+        self._load_worker: LogLoadWorker | None = None
 
         self._build_ui()
         apply_app_locale(self)
@@ -358,30 +492,34 @@ class LogsPage(QWidget):
         layout.setVerticalSpacing(max(4, spacing.logs_filter_gap - 2))
 
         self.csv_path_edit = QLineEdit()
-        browse_csv = QPushButton("Browse CSV Log...")
-        browse_csv.clicked.connect(self._browse_csv_log)
-        load_csv = QPushButton("Load Log")
-        load_csv.clicked.connect(self.load_current_csv)
-        layout.addWidget(QLabel("CSV"), 0, 0)
+        self.browse_csv_button = QPushButton("Browse CSV Log...")
+        self.browse_csv_button.clicked.connect(self._browse_csv_log)
+        self.load_csv_button = QPushButton("Load Log")
+        self.load_csv_button.clicked.connect(self.load_current_csv)
+        csv_label = QLabel("&CSV")
+        csv_label.setBuddy(self.csv_path_edit)
+        layout.addWidget(csv_label, 0, 0)
         layout.addWidget(self.csv_path_edit, 0, 1)
-        layout.addWidget(browse_csv, 0, 2)
-        layout.addWidget(load_csv, 0, 3)
+        layout.addWidget(self.browse_csv_button, 0, 2)
+        layout.addWidget(self.load_csv_button, 0, 3)
 
         self.output_folder_edit = QLineEdit()
         self.output_folder_edit.textEdited.connect(self._mark_logs_root_override)
-        choose_folder = QPushButton("Choose Output Folder...")
-        choose_folder.clicked.connect(self._choose_output_folder)
+        self.choose_folder_button = QPushButton("Choose Output Folder...")
+        self.choose_folder_button.clicked.connect(self._choose_output_folder)
         self.load_job_history_button = QPushButton("Load Job History")
         self.load_job_history_button.clicked.connect(self.load_job_history)
-        layout.addWidget(QLabel("Job root"), 1, 0)
+        job_root_label = QLabel("&Job root")
+        job_root_label.setBuddy(self.output_folder_edit)
+        layout.addWidget(job_root_label, 1, 0)
         layout.addWidget(self.output_folder_edit, 1, 1)
-        layout.addWidget(choose_folder, 1, 2)
+        layout.addWidget(self.choose_folder_button, 1, 2)
         layout.addWidget(self.load_job_history_button, 1, 3)
 
         self.detected_logs_combo = QComboBox()
         self.detected_logs_combo.setEnabled(False)
-        find_logs = QPushButton("Find Logs")
-        find_logs.clicked.connect(self.find_logs_in_output_folder)
+        self.find_logs_button = QPushButton("Find Logs")
+        self.find_logs_button.clicked.connect(self.find_logs_in_output_folder)
         self.load_detected_button = QPushButton("Load Selected Log")
         self.load_detected_button.setEnabled(False)
         self.load_detected_button.clicked.connect(self.load_selected_detected_log)
@@ -390,9 +528,13 @@ class LogsPage(QWidget):
         self.source_summary_label.setWordWrap(False)
         layout.addWidget(self.source_summary_label, 2, 1)
         layout.addWidget(self.detected_logs_combo, 2, 2)
-        layout.addWidget(find_logs, 2, 3)
+        layout.addWidget(self.find_logs_button, 2, 3)
         layout.addWidget(self.load_detected_button, 2, 4)
-        layout.addWidget(self.feedback_label, 3, 0, 1, 5)
+        self.cancel_load_button = QPushButton("Cancel")
+        self.cancel_load_button.setEnabled(False)
+        self.cancel_load_button.clicked.connect(self.cancel_log_loading)
+        layout.addWidget(self.feedback_label, 3, 0, 1, 4)
+        layout.addWidget(self.cancel_load_button, 3, 4)
         layout.setColumnStretch(1, 1)
         return group
 
@@ -418,13 +560,19 @@ class LogsPage(QWidget):
         self.errors_only_checkbox = QCheckBox("Errors only")
         self.errors_only_checkbox.stateChanged.connect(lambda _state: self.apply_filters())
 
-        layout.addWidget(QLabel("Result"))
+        result_label = QLabel("&Result")
+        result_label.setBuddy(self.result_filter_combo)
+        layout.addWidget(result_label)
         layout.addWidget(self.result_filter_combo)
         layout.addSpacing(theme_spacing().compact_control_gap)
-        layout.addWidget(QLabel("Mode"))
+        mode_label_widget = QLabel("&Mode")
+        mode_label_widget.setBuddy(self.mode_filter_combo)
+        layout.addWidget(mode_label_widget)
         layout.addWidget(self.mode_filter_combo)
         layout.addSpacing(theme_spacing().compact_control_gap)
-        layout.addWidget(QLabel("Search"))
+        search_label = QLabel("&Search")
+        search_label.setBuddy(self.search_edit)
+        layout.addWidget(search_label)
         layout.addWidget(self.search_edit, 1)
         layout.addWidget(self.errors_only_checkbox)
         return group
@@ -435,13 +583,16 @@ class LogsPage(QWidget):
         layout = QVBoxLayout(group)
         layout.setContentsMargins(*group_content_margins())
 
-        self.records_table = QTableWidget(0, len(TABLE_COLUMNS))
-        self.records_table.setHorizontalHeaderLabels([label for _, label in TABLE_COLUMNS])
+        self.records_model = InspectionLogTableModel(parent=self)
+        self.records_proxy_model = InspectionLogFilterProxyModel(self)
+        self.records_proxy_model.setSourceModel(self.records_model)
+        self.records_table = QTableView()
+        self.records_table.setModel(self.records_proxy_model)
         self.records_table.setObjectName("recordsTable")
         self.records_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.records_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.records_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.records_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.records_table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        self.records_table.setSelectionMode(QTableView.SelectionMode.SingleSelection)
+        self.records_table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         self.records_table.setAlternatingRowColors(True)
         self.records_table.setShowGrid(False)
         self.records_table.setWordWrap(False)
@@ -450,7 +601,7 @@ class LogsPage(QWidget):
         self.records_table.verticalHeader().setVisible(False)
         self.records_table.verticalHeader().setDefaultSectionSize(theme_dimensions().logs_table_row_height)
         self._configure_records_table_header()
-        self.records_table.itemSelectionChanged.connect(self._on_record_selection_changed)
+        self.records_table.selectionModel().selectionChanged.connect(self._on_record_selection_changed)
         layout.addWidget(self.records_table)
         return group
 
@@ -698,13 +849,9 @@ class LogsPage(QWidget):
         self.state.logs_root_dir = Path(text) if text else None
 
     def find_logs_in_output_folder(self) -> None:
-        try:
-            output_dir = Path(self.output_folder_edit.text().strip())
-            logs = find_log_files(output_dir)
-        except Exception as exc:
-            self._set_feedback(str(exc), ok=False)
-            return
+        self._start_log_operation("find", Path(self.output_folder_edit.text().strip()))
 
+    def _show_detected_logs(self, output_dir: Path, logs: list[Path]) -> None:
         self.detected_logs_combo.clear()
         for path in logs:
             self.detected_logs_combo.addItem(str(path), str(path))
@@ -726,71 +873,117 @@ class LogsPage(QWidget):
             self.load_current_csv()
 
     def load_current_csv(self) -> None:
-        try:
-            path = Path(self.csv_path_edit.text().strip())
-            rows, _ = load_inspection_log(path)
-        except Exception as exc:
-            self._set_feedback(str(exc), ok=False)
-            return
-
-        self._current_csv_path = path
-        self._current_source_paths = [path]
-        self._rows = rows_with_log_metadata(rows, path, infer_log_mode(path))
-        self.apply_filters()
-        self.source_summary_label.setText(f"Loaded {len(rows)} record(s) from {path.name}.")
-        self._set_feedback(f"Loaded {len(rows)} record(s) from {path}.", ok=True)
+        self._start_log_operation("csv", Path(self.csv_path_edit.text().strip()))
 
     def load_job_history(self) -> None:
-        try:
-            job_root = Path(self.output_folder_edit.text().strip())
-            rows, source_paths = load_job_history_rows(job_root)
-        except Exception as exc:
-            self._set_feedback(str(exc), ok=False)
-            return
+        self._start_log_operation("history", Path(self.output_folder_edit.text().strip()))
 
+    def _show_job_history(self, job_root: Path, rows: list[dict[str, str]], source_paths: list[Path]) -> None:
         self._current_csv_path = None
         self._current_source_paths = source_paths
         self._rows = rows
-        self.apply_filters()
+        self._set_model_rows()
         self.source_summary_label.setText(f"Loaded {len(rows)} record(s) from {len(source_paths)} job history log file(s).")
         self._set_feedback(
             f"Loaded {len(rows)} job history record(s) from {len(source_paths)} log file(s) under {job_root}.",
             ok=True,
         )
 
+    def _start_log_operation(self, operation: str, path: Path) -> None:
+        if self._load_thread is not None:
+            self._set_feedback("A log operation is already running.", ok=False)
+            return
+        self._set_log_loading(True)
+        self._set_feedback("Loading inspection history...", ok=True)
+        self._load_thread = QThread(self)
+        self._load_worker = LogLoadWorker(operation, path)
+        self._load_worker.moveToThread(self._load_thread)
+        self._load_thread.started.connect(self._load_worker.run)
+        self._load_worker.completed.connect(self._on_log_operation_completed, Qt.ConnectionType.QueuedConnection)
+        self._load_worker.failed.connect(self._on_log_operation_failed, Qt.ConnectionType.QueuedConnection)
+        self._load_worker.cancelled.connect(self._on_log_operation_cancelled, Qt.ConnectionType.QueuedConnection)
+        self._load_worker.finished.connect(self._load_thread.quit)
+        self._load_worker.finished.connect(self._load_worker.deleteLater)
+        self._load_thread.finished.connect(self._load_thread.deleteLater)
+        self._load_thread.finished.connect(self._on_log_thread_finished, Qt.ConnectionType.QueuedConnection)
+        self._load_thread.start()
+
+    @Slot(str, object, object)
+    def _on_log_operation_completed(self, operation: str, raw_path: object, payload: object) -> None:
+        path = Path(raw_path)
+        if operation == "find":
+            self._show_detected_logs(path, list(payload))
+            return
+        if operation == "csv":
+            rows = list(payload)
+            self._current_csv_path = path
+            self._current_source_paths = [path]
+            self._rows = rows
+            self._set_model_rows()
+            self.source_summary_label.setText(f"Loaded {len(rows)} record(s) from {path.name}.")
+            self._set_feedback(f"Loaded {len(rows)} record(s) from {path}.", ok=True)
+            return
+        if operation == "history":
+            rows, source_paths = payload
+            self._show_job_history(path, list(rows), list(source_paths))
+
+    @Slot(str)
+    def _on_log_operation_failed(self, message: str) -> None:
+        self._set_feedback(message, ok=False)
+
+    @Slot(str)
+    def _on_log_operation_cancelled(self, message: str) -> None:
+        self._set_feedback(message, ok=True)
+
+    @Slot()
+    def _on_log_thread_finished(self) -> None:
+        self._load_thread = None
+        self._load_worker = None
+        self._set_log_loading(False)
+
+    def cancel_log_loading(self) -> None:
+        if self._load_worker is None:
+            return
+        self._load_worker.request_cancel()
+        self.cancel_load_button.setEnabled(False)
+        self._set_feedback("Cancellation requested. Waiting for the current file operation to finish.", ok=True)
+
+    def _set_log_loading(self, loading: bool) -> None:
+        for widget in (
+            self.browse_csv_button,
+            self.load_csv_button,
+            self.choose_folder_button,
+            self.load_job_history_button,
+            self.find_logs_button,
+        ):
+            widget.setEnabled(not loading)
+        self.load_detected_button.setEnabled(not loading and self.detected_logs_combo.count() > 0)
+        self.detected_logs_combo.setEnabled(not loading and self.detected_logs_combo.count() > 0)
+        self.cancel_load_button.setEnabled(loading)
+
     def apply_filters(self) -> None:
-        self._filtered_rows = filter_log_rows(
-            self._rows,
+        self.records_proxy_model.set_filters(
             self.result_filter_combo.currentText(),
+            self.mode_filter_combo.currentText(),
             self.search_edit.text(),
             self.errors_only_checkbox.isChecked(),
-            self.mode_filter_combo.currentText(),
         )
-        self._populate_table()
-        if self._filtered_rows:
+        if self.records_proxy_model.rowCount() > 0:
             self.records_table.selectRow(0)
         else:
             self._clear_details_and_previews()
             if self._rows:
                 self._set_feedback("No records match the current filters.", ok=False)
 
-    def _populate_table(self) -> None:
-        self.records_table.setRowCount(len(self._filtered_rows))
-        for row_index, row in enumerate(self._filtered_rows):
-            for column_index, (key, _) in enumerate(TABLE_COLUMNS):
-                raw_value = row_image_name(row) if key == "image_name" else row.get(key, "")
-                value = raw_value if key in {"timestamp", LOG_MODE_KEY, "image_name"} else format_log_value(key, raw_value)
-                item = QTableWidgetItem(value)
-                item.setToolTip(raw_value if raw_value == value else f"{value} (raw: {raw_value})")
-                item.setTextAlignment(_table_alignment_for_column(key))
-                self.records_table.setItem(row_index, column_index, item)
-        self.records_table.resizeRowsToContents()
+    def _set_model_rows(self) -> None:
+        self.records_model.set_rows(self._rows)
+        self.apply_filters()
 
-    def _on_record_selection_changed(self) -> None:
-        row_index = self.records_table.currentRow()
-        if row_index < 0 or row_index >= len(self._filtered_rows):
+    def _on_record_selection_changed(self, *_args) -> None:
+        row = self._current_row()
+        if row is None:
             return
-        self._update_selected_record(self._filtered_rows[row_index])
+        self._update_selected_record(row)
 
     def _update_selected_record(self, row: dict[str, str]) -> None:
         self._has_selected_record = True
@@ -891,10 +1084,21 @@ class LogsPage(QWidget):
         self._open_path(Path(path) if path else None, "Selected row has no annotated image path.")
 
     def _current_row(self) -> dict[str, str] | None:
-        row_index = self.records_table.currentRow()
-        if row_index < 0 or row_index >= len(self._filtered_rows):
+        proxy_index = self.records_table.currentIndex()
+        if not proxy_index.isValid():
             return None
-        return self._filtered_rows[row_index]
+        source_index = self.records_proxy_model.mapToSource(proxy_index)
+        return self.records_model.row_at(source_index.row())
+
+    def shutdown(self) -> bool:
+        if self._load_thread is None:
+            return True
+        self.cancel_log_loading()
+        try:
+            self._load_thread.requestInterruption()
+        except RuntimeError:
+            return True
+        return False
 
     def _open_path(self, path: Path | None, missing_message: str) -> None:
         if path is None:

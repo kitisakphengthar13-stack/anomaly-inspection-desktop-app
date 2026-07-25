@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from threading import Event
 
 from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal, Slot
 
@@ -50,6 +51,7 @@ class CameraController(QObject):
     resolution_changed = Signal(int, int)
     error = Signal(str)
     stopped = Signal()
+    stop_worker_requested = Signal()
 
     def __init__(
         self,
@@ -67,8 +69,8 @@ class CameraController(QObject):
         self._session_id = 0
         self._thread: QThread | None = None
         self._worker: CameraWorker | None = None
+        self._stop_event: Event | None = None
         self._has_valid_frame = False
-        self._release_after_finish = False
 
         self._idle_release_timer = QTimer(self)
         self._idle_release_timer.setSingleShot(True)
@@ -82,7 +84,7 @@ class CameraController(QObject):
             next_state = CameraControllerState.RUNNING if self._has_valid_frame else CameraControllerState.WARMING
             self._set_state(next_state, "Camera preview resumed.", "success")
             return
-        if self._worker is not None or self._state in {
+        if self._worker is not None or self._thread is not None or self._state in {
             CameraControllerState.OPENING,
             CameraControllerState.WARMING,
             CameraControllerState.RUNNING,
@@ -111,10 +113,13 @@ class CameraController(QObject):
         if self._worker is not None:
             self._hard_stop_worker("Camera stopping.")
 
-    def shutdown(self) -> None:
+    def shutdown(self) -> bool:
         self._desired_running = False
         self._idle_release_timer.stop()
-        self._hard_stop_worker("Camera released.", wait=True)
+        if self._worker is None and self._thread is None:
+            return True
+        self._hard_stop_worker("Camera released.")
+        return False
 
     def is_running(self) -> bool:
         return self._state == CameraControllerState.RUNNING
@@ -133,9 +138,9 @@ class CameraController(QObject):
         self._session_id += 1
         session_id = self._session_id
         self._has_valid_frame = False
-        self._release_after_finish = False
 
         self._thread = QThread(self)
+        self._stop_event = Event()
         self._worker = self._worker_factory(
             camera_index,
             width,
@@ -147,16 +152,19 @@ class CameraController(QObject):
             blank_max_value=self._policy.blank_max_value,
             blank_mean_max=self._policy.blank_mean_max,
             preview_interval_seconds=self._policy.preview_interval_seconds,
+            stop_event=self._stop_event,
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
+        self.stop_worker_requested.connect(self._worker.stop, Qt.ConnectionType.QueuedConnection)
         self._worker.frame_ready.connect(self._on_worker_frame_ready, Qt.ConnectionType.QueuedConnection)
         self._worker.actual_resolution.connect(self._on_worker_resolution, Qt.ConnectionType.QueuedConnection)
         self._worker.status.connect(self._on_worker_status, Qt.ConnectionType.QueuedConnection)
         self._worker.error.connect(self._on_worker_error, Qt.ConnectionType.QueuedConnection)
         self._worker.finished.connect(self._on_worker_finished, Qt.ConnectionType.QueuedConnection)
-        self._worker.finished.connect(self._thread.quit)
+        self._worker.finished.connect(self._thread.quit, Qt.ConnectionType.DirectConnection)
         self._worker.finished.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self._on_thread_finished, Qt.ConnectionType.QueuedConnection)
         self._thread.finished.connect(self._thread.deleteLater)
         self._thread.start()
         self._set_state(CameraControllerState.OPENING, "Starting camera...", "info")
@@ -166,7 +174,7 @@ class CameraController(QObject):
             return
         self._hard_stop_worker("Camera released after idle timeout.")
 
-    def _hard_stop_worker(self, message: str, *, wait: bool = False) -> None:
+    def _hard_stop_worker(self, message: str) -> None:
         self._idle_release_timer.stop()
         worker = self._worker
         thread = self._thread
@@ -174,18 +182,13 @@ class CameraController(QObject):
             self._set_state(CameraControllerState.RELEASED, message, "info")
             self.stopped.emit()
             return
-        self._release_after_finish = True
         self._set_state(CameraControllerState.STOPPING, message, "info")
-        if worker is not None:
-            try:
-                worker.stop()
-            except RuntimeError:
-                pass
+        if self._stop_event is not None:
+            self._stop_event.set()
+        self.stop_worker_requested.emit()
         if thread is not None:
             try:
-                thread.quit()
-                if wait:
-                    thread.wait(2500)
+                thread.requestInterruption()
             except RuntimeError:
                 pass
 
@@ -232,20 +235,17 @@ class CameraController(QObject):
         if session_id != self._session_id:
             camera_log(f"camera controller ignored stale finished; signal_session={session_id}; current_session={self._session_id}")
             return
-        thread = self._thread
         self._worker = None
-        self._thread = None
-        if thread is not None:
-            try:
-                thread.quit()
-                thread.wait(500)
-            except RuntimeError:
-                pass
+        self._stop_event = None
         if self._state == CameraControllerState.FAILED:
             self.stopped.emit()
             return
         self._set_state(CameraControllerState.RELEASED, "Camera released.", "info")
         self.stopped.emit()
+
+    @Slot()
+    def _on_thread_finished(self) -> None:
+        self._thread = None
 
     def _set_state(self, state: CameraControllerState, message: str, level: str) -> None:
         self._state = state

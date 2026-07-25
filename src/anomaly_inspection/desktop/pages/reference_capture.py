@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
+from threading import Event
 from typing import Callable
 
 import cv2
@@ -213,6 +214,7 @@ class CameraWorker(QObject):
         blank_max_value: int = 2,
         blank_mean_max: float = 1.0,
         preview_interval_seconds: float = PREVIEW_INTERVAL_SECONDS,
+        stop_event: Event | None = None,
     ) -> None:
         super().__init__()
         self.session_id = session_id
@@ -227,6 +229,7 @@ class CameraWorker(QObject):
         self._blank_max_value = blank_max_value
         self._blank_mean_max = blank_mean_max
         self._preview_interval_seconds = preview_interval_seconds
+        self._stop_event = stop_event or Event()
 
     @Slot()
     def run(self) -> None:
@@ -254,7 +257,7 @@ class CameraWorker(QObject):
             self._configure_capture(capture)
 
             self._running = True
-            while self._running:
+            while self._running and not self._stop_event.is_set():
                 ok, frame = capture.read()
                 if not ok or frame is None:
                     camera_log(f"camera frame read failed; session={self.session_id}")
@@ -296,7 +299,7 @@ class CameraWorker(QObject):
                             )
                         if blank_frame_count >= self._blank_recovery_frames:
                             if recovery_attempts < self._max_blank_recovery_attempts:
-                                if not self._running:
+                                if not self._running or self._stop_event.is_set():
                                     break
                                 recovery_attempts += 1
                                 camera_log(
@@ -320,7 +323,7 @@ class CameraWorker(QObject):
                                     self._capture_factory,
                                 )
                                 self._configure_capture(capture)
-                                if not self._running:
+                                if not self._running or self._stop_event.is_set():
                                     break
                                 startup_frame_count = 0
                                 blank_frame_count = 0
@@ -375,6 +378,7 @@ class CameraWorker(QObject):
     @Slot()
     def stop(self) -> None:
         self._running = False
+        self._stop_event.set()
 
     def _configure_capture(self, capture: object) -> None:
         if self.width > 0:
@@ -517,6 +521,8 @@ def _camera_empty_state_text(message: str) -> str:
 
 
 class ReferenceCapturePage(QWidget):
+    stop_worker_requested = Signal()
+
     def __init__(
         self,
         state: AppState,
@@ -529,6 +535,7 @@ class ReferenceCapturePage(QWidget):
         self._reference_saved_callback = reference_saved_callback
         self._thread: QThread | None = None
         self._worker: CameraWorker | None = None
+        self._camera_stop_event: Event | None = None
         self._latest_frame: np.ndarray | None = None
         self._captured_frame: np.ndarray | None = None
         self._state = "idle"
@@ -602,7 +609,9 @@ class ReferenceCapturePage(QWidget):
         self.camera_index_spin = QSpinBox()
         self.camera_index_spin.setRange(0, 32)
         self.camera_index_spin.setValue(0)
-        grid.addWidget(QLabel("Camera index"), 0, 0)
+        camera_index_label = QLabel("&Camera index")
+        camera_index_label.setBuddy(self.camera_index_spin)
+        grid.addWidget(camera_index_label, 0, 0)
         grid.addWidget(self.camera_index_spin, 0, 1)
 
         self.width_spin = QSpinBox()
@@ -611,7 +620,9 @@ class ReferenceCapturePage(QWidget):
         self.height_spin = QSpinBox()
         self.height_spin.setRange(0, 10000)
         self.height_spin.setSpecialValueText("Auto")
-        grid.addWidget(QLabel("Requested frame size"), 0, 2)
+        frame_size_label = QLabel("Requested frame &size")
+        frame_size_label.setBuddy(self.width_spin)
+        grid.addWidget(frame_size_label, 0, 2)
         grid.addWidget(self.width_spin, 0, 3)
         grid.addWidget(QLabel("x"), 0, 4)
         grid.addWidget(self.height_spin, 0, 5)
@@ -703,14 +714,17 @@ class ReferenceCapturePage(QWidget):
         camera_log(f"start camera clicked; creating camera thread; session={session_id}")
 
         self._thread = QThread(self)
+        self._camera_stop_event = Event()
         self._worker = CameraWorker(
             self.camera_index_spin.value(),
             self.width_spin.value(),
             self.height_spin.value(),
             session_id=session_id,
+            stop_event=self._camera_stop_event,
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
+        self.stop_worker_requested.connect(self._worker.stop, Qt.ConnectionType.QueuedConnection)
         self._worker.frame_ready.connect(self._on_frame_ready_from_worker, Qt.ConnectionType.QueuedConnection)
         self._worker.actual_resolution.connect(
             self._on_actual_resolution_from_worker,
@@ -719,8 +733,9 @@ class ReferenceCapturePage(QWidget):
         self._worker.status.connect(self._on_camera_status_from_worker, Qt.ConnectionType.QueuedConnection)
         self._worker.error.connect(self._on_camera_error_from_worker, Qt.ConnectionType.QueuedConnection)
         self._worker.finished.connect(self._on_worker_finished_from_worker, Qt.ConnectionType.QueuedConnection)
-        self._worker.finished.connect(self._thread.quit)
+        self._worker.finished.connect(self._thread.quit, Qt.ConnectionType.DirectConnection)
         self._worker.finished.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self._on_camera_thread_finished, Qt.ConnectionType.QueuedConnection)
         self._thread.finished.connect(self._thread.deleteLater)
         self._thread.start()
 
@@ -774,9 +789,9 @@ class ReferenceCapturePage(QWidget):
         except Exception as exc:
             self._set_feedback(f"Could not save reference image: {exc}", ok=False)
 
-    def shutdown(self) -> None:
+    def shutdown(self) -> bool:
         self._camera_lifecycle = "stopping"
-        self._stop_worker(self._camera_session_id)
+        return self._stop_worker(self._camera_session_id)
 
     def _on_frame_ready(self, frame: object) -> None:
         self._on_frame_ready_for_session(self._camera_session_id, frame)
@@ -927,7 +942,6 @@ class ReferenceCapturePage(QWidget):
             )
             return
         camera_log(f"camera worker finished; session={session_id}")
-        self._thread = None
         self._worker = None
         self._camera_lifecycle = "stopped"
         if self._state == "live_preview":
@@ -935,29 +949,25 @@ class ReferenceCapturePage(QWidget):
         else:
             self._set_state(self._state)
 
-    def _stop_worker(self, session_id: int | None = None) -> bool:
-        worker = self._worker
-        thread = self._thread
-        if worker is not None:
-            try:
-                if shiboken6.isValid(worker):
-                    camera_log(f"requesting camera worker stop; session={session_id}")
-                    worker.stop()
-            except RuntimeError:
-                pass
-        if thread is not None:
-            try:
-                if shiboken6.isValid(thread):
-                    camera_log(f"requesting camera thread quit; session={session_id}")
-                    thread.quit()
-                    if not thread.wait(2500):
-                        camera_log(f"camera thread did not stop within 2500 ms; session={session_id}")
-                        return False
-            except RuntimeError:
-                pass
+    @Slot()
+    def _on_camera_thread_finished(self) -> None:
         self._thread = None
-        self._worker = None
-        return True
+        self._camera_stop_event = None
+
+    def _stop_worker(self, session_id: int | None = None) -> bool:
+        thread = self._thread
+        if thread is None:
+            return True
+        camera_log(f"requesting camera worker stop; session={session_id}")
+        if self._camera_stop_event is not None:
+            self._camera_stop_event.set()
+        self.stop_worker_requested.emit()
+        try:
+            if shiboken6.isValid(thread):
+                thread.requestInterruption()
+        except RuntimeError:
+            return True
+        return False
 
     def _set_state(self, state: str) -> None:
         self._state = state

@@ -275,10 +275,15 @@ class PathPickerRow(QWidget):
         self.line_edit = QLineEdit()
         self.line_edit.setReadOnly(read_only)
         self.line_edit.setMinimumWidth(0)
+        accessible_label = (label_text or button_text).replace("&", "").replace("...", "").strip()
+        self.line_edit.setAccessibleName(accessible_label)
         layout.addWidget(self.line_edit, 1)
+        if label_text:
+            label.setBuddy(self.line_edit)
 
         self.button = QPushButton(button_text)
         self.button.setObjectName("pathPickerButton")
+        self.button.setAccessibleDescription(f"Select a value for {accessible_label}.")
         set_button_icon(self.button, "browse")
         if callback is not None:
             self.button.clicked.connect(callback)

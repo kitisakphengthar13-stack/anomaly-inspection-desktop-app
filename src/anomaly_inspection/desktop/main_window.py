@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -101,6 +101,11 @@ class MainWindow(QMainWindow):
         self._nav_group_labels: list[QLabel] = []
         self._nav_separators: list[QFrame] = []
         self._compact_shell = False
+        self._close_pending = False
+        self._close_retry_timer = QTimer(self)
+        self._close_retry_timer.setSingleShot(True)
+        self._close_retry_timer.setInterval(100)
+        self._close_retry_timer.timeout.connect(self.close)
 
         self._build_ui()
         apply_app_locale(self)
@@ -351,14 +356,25 @@ class MainWindow(QMainWindow):
         self._set_status_message(f"Zones saved: {path}")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        ready = True
         if self._reference_capture_page is not None:
-            self._reference_capture_page.shutdown()
+            ready = self._reference_capture_page.shutdown() and ready
         if self._project_setup_page is not None:
-            self._project_setup_page.shutdown()
+            ready = self._project_setup_page.shutdown() and ready
         if self._inspect_image_page is not None:
-            self._inspect_image_page.shutdown()
+            ready = self._inspect_image_page.shutdown() and ready
         if self._inspect_camera_page is not None:
-            self._inspect_camera_page.shutdown()
+            ready = self._inspect_camera_page.shutdown() and ready
+        if self._logs_page is not None:
+            ready = self._logs_page.shutdown() and ready
+        if not ready:
+            self._close_pending = True
+            self._set_status_message("Closing after active camera and inspection work finishes.")
+            event.ignore()
+            self._close_retry_timer.start()
+            return
+        self._close_pending = False
+        self._close_retry_timer.stop()
         super().closeEvent(event)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
