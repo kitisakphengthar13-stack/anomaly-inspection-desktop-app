@@ -27,10 +27,10 @@ from PySide6.QtWidgets import (
 from anomaly_inspection.core.reference_image import save_reference_image
 from anomaly_inspection.desktop.ui.icons import icon_pixmap, state_icon
 from anomaly_inspection.desktop.job_paths import default_reference_image_path as job_reference_image_path
-from anomaly_inspection.desktop.ui.layout_contracts import ActionSection
+from anomaly_inspection.desktop.ui.layout_contracts import ActionButtonGrid
 from anomaly_inspection.desktop.state import AppState
 from anomaly_inspection.desktop.ui.theme import page_margins, preview_surface_stylesheet, theme_dimensions, theme_spacing, zero_margins
-from anomaly_inspection.desktop.ui.components import PathPickerRow, ScrollablePane, SectionPanel, StatusBanner, set_button_icon, set_button_role
+from anomaly_inspection.desktop.ui.components import PathPickerRow, SectionPanel, StatusBanner, set_button_icon, set_button_role
 
 StatusCallback = Callable[[str], None]
 ReferenceSavedCallback = Callable[[Path], None]
@@ -568,16 +568,13 @@ class ReferenceCapturePage(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setObjectName("referenceCaptureWorkspace")
         splitter.setChildrenCollapsible(False)
-        splitter.addWidget(self._control_pane_scroll())
+        splitter.addWidget(self._control_pane())
         splitter.addWidget(self._preview_group())
         dimensions = theme_dimensions()
         splitter.setSizes([dimensions.camera_splitter_left_width, dimensions.camera_splitter_right_width])
         splitter.setStretchFactor(0, dimensions.camera_splitter_left_stretch)
         splitter.setStretchFactor(1, dimensions.camera_splitter_right_stretch)
         return splitter
-
-    def _control_pane_scroll(self) -> ScrollablePane:
-        return ScrollablePane(self._control_pane(), object_name="referenceCaptureControlPaneScroll")
 
     def _control_pane(self) -> QWidget:
         widget = QWidget()
@@ -652,10 +649,12 @@ class ReferenceCapturePage(QWidget):
 
         for button in (self.start_button, self.stop_button, self.capture_button, self.save_button, self.retake_button):
             set_button_role(button, "secondary")
-        action_section = ActionSection(rows=2)
-        action_section.add_row((self.start_button, self.capture_button, self.save_button, self.retake_button))
-        action_section.add_row((self.stop_button,))
-        panel.content_layout.addWidget(action_section)
+        panel.content_layout.addWidget(
+            ActionButtonGrid(
+                (self.start_button, self.capture_button, self.save_button, self.retake_button, self.stop_button),
+                columns=3,
+            )
+        )
         panel.content_layout.addWidget(self.feedback_label)
         return panel
 

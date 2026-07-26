@@ -38,7 +38,7 @@ from anomaly_inspection.desktop.pages.inspect_image import (
     require_saved_config_path,
 )
 from anomaly_inspection.desktop.job_paths import default_camera_output_dir as job_camera_output_dir
-from anomaly_inspection.desktop.ui.layout_contracts import ActionSection, ControlRail, WorkbenchLayout
+from anomaly_inspection.desktop.ui.layout_contracts import ActionButtonGrid, ControlRail, WorkbenchLayout
 from anomaly_inspection.desktop.camera_controller import CameraController, CameraControllerState
 from anomaly_inspection.desktop.pages.reference_capture import (
     AspectImageLabel,
@@ -201,7 +201,7 @@ class InspectCameraPage(QWidget):
         rail = ControlRail(object_name="cameraControlPane")
         rail.add_fixed(self._camera_readiness_group())
         rail.add_fixed(self._operation_group())
-        rail.set_scroll_body(self._secondary_control_pane(), object_name="cameraControlPaneScroll")
+        rail.add_fixed(self._secondary_control_pane())
         return rail
 
     def _secondary_control_pane(self) -> QWidget:
@@ -282,10 +282,20 @@ class InspectCameraPage(QWidget):
             self.open_output_button,
         ):
             set_button_role(button, "secondary")
-        action_section = ActionSection(rows=2)
-        action_section.add_row((self.start_button, self.capture_button, self.inspect_button, self.retake_button))
-        action_section.add_row((self.stop_button, self.cancel_inspection_button, self.open_output_button))
-        panel.content_layout.addWidget(action_section)
+        panel.content_layout.addWidget(
+            ActionButtonGrid(
+                (
+                    self.start_button,
+                    self.capture_button,
+                    self.inspect_button,
+                    self.retake_button,
+                    self.stop_button,
+                    self.cancel_inspection_button,
+                    self.open_output_button,
+                ),
+                columns=4,
+            )
+        )
         panel.content_layout.addWidget(self.feedback_label)
         return panel
 

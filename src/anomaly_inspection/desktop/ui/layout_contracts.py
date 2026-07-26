@@ -6,6 +6,7 @@ from typing import Literal
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
+    QGridLayout,
     QLabel,
     QPushButton,
     QSizePolicy,
@@ -92,6 +93,30 @@ class ActionSection(QWidget):
             + margins.bottom()
         )
         self.setMinimumHeight(height)
+
+
+class ActionButtonGrid(QWidget):
+    """Compact, evenly sized action grid for multi-step workstation actions."""
+
+    def __init__(self, buttons: Iterable[QPushButton], *, columns: int = 3) -> None:
+        super().__init__()
+        self.setObjectName("actionButtonGrid")
+        self._columns = max(1, columns)
+        self._buttons = tuple(buttons)
+        layout = QGridLayout(self)
+        layout.setContentsMargins(*zero_margins())
+        layout.setHorizontalSpacing(theme_spacing().control_gap)
+        layout.setVerticalSpacing(theme_spacing().control_gap)
+
+        for index, button in enumerate(self._buttons):
+            button.setMinimumHeight(theme_dimensions().button_min_height)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            layout.addWidget(button, index // self._columns, index % self._columns)
+
+        for column in range(self._columns):
+            layout.setColumnStretch(column, 1)
+
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
 
 class ControlRail(QWidget):

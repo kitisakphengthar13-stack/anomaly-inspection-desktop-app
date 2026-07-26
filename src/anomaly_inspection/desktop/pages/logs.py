@@ -21,6 +21,8 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -35,6 +37,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QTableView,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -52,7 +55,8 @@ from anomaly_inspection.desktop.ui.theme import (
     zero_margins,
 )
 from anomaly_inspection.desktop.ui.locale import apply_app_locale
-from anomaly_inspection.desktop.ui.components import ResultBadge, ResultImageTabs, ScrollablePane, StatusBanner, set_button_icon, set_button_role
+from anomaly_inspection.desktop.ui.components import ImagePreviewWidget, ResultBadge, StatusBanner, set_button_icon, set_button_role
+from anomaly_inspection.desktop.ui.layout_contracts import ActionButtonGrid
 
 StatusCallback = Callable[[str], None]
 
@@ -390,6 +394,62 @@ class LogLoadWorker(QObject):
             self.finished.emit()
 
 
+class LogImageDialog(QDialog):
+    """On-demand image viewer so Logs can prioritize the inspection table."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("logsImageDialog")
+        self.setWindowTitle("Log Images")
+        self.setMinimumSize(720, 520)
+        self.resize(1000, 720)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(*page_margins())
+        layout.setSpacing(theme_spacing().control_gap)
+
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("logsImageTabWidget")
+        self.fit_image_button = set_button_role(QPushButton("Fit Image"), "secondary")
+        set_button_icon(self.fit_image_button, "fit")
+        self.fit_image_button.clicked.connect(self.fit_active_preview)
+        self.tabs.setCornerWidget(self.fit_image_button, Qt.Corner.TopRightCorner)
+
+        self.input_preview = ImagePreviewWidget("No input image saved for this log.", min_height=420)
+        self.annotated_preview = ImagePreviewWidget("No annotated image generated for this log.", min_height=420)
+        self.heatmap_preview = ImagePreviewWidget("No heatmap generated for this log.", min_height=420)
+        self.mask_preview = ImagePreviewWidget("No presence mask generated for this log.", min_height=420)
+        self.tabs.addTab(self.input_preview, "Input")
+        self.tabs.addTab(self.annotated_preview, "Annotated")
+        self.tabs.addTab(self.heatmap_preview, "Heatmap")
+        self.tabs.addTab(self.mask_preview, "Presence Mask")
+        self.tabs.currentChanged.connect(self._refit_active_preview)
+        layout.addWidget(self.tabs, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def set_record(self, row: dict[str, str]) -> None:
+        image_name = row_image_name(row)
+        self.setWindowTitle(f"Log Images — {image_name}" if image_name else "Log Images")
+        self.input_preview.set_image_path(row.get("image_path"), "No input image saved for this log.")
+        self.annotated_preview.set_image_path(row.get("annotated_image_path"), "No annotated image generated for this log.")
+        self.heatmap_preview.set_image_path(row.get("heatmap_path"), "No heatmap generated for this log.")
+        self.mask_preview.set_image_path(row.get("presence_mask_path"), "No presence mask generated for this log.")
+        self.tabs.setCurrentIndex(0)
+
+    def fit_active_preview(self) -> None:
+        preview = self.tabs.currentWidget()
+        if isinstance(preview, ImagePreviewWidget):
+            preview.fit_current_image()
+
+    def _refit_active_preview(self) -> None:
+        preview = self.tabs.currentWidget()
+        if isinstance(preview, ImagePreviewWidget):
+            preview.refit_if_in_fit_mode()
+
+
 class LogsPage(QWidget):
     def __init__(self, state: AppState, status_callback: StatusCallback | None = None) -> None:
         super().__init__()
@@ -405,6 +465,7 @@ class LogsPage(QWidget):
         self._has_selected_record = False
         self._load_thread: QThread | None = None
         self._load_worker: LogLoadWorker | None = None
+        self._log_image_dialog: LogImageDialog | None = None
 
         self._build_ui()
         apply_app_locale(self)
@@ -463,11 +524,9 @@ class LogsPage(QWidget):
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(*zero_margins())
         layout.setSpacing(theme_spacing().logs_review_gap)
-        context_scroll = ScrollablePane(self._selected_record_context(), object_name="logsSelectedRecordScroll")
-        context_scroll.setMaximumHeight(theme_dimensions().logs_selected_record_context_max_height)
-        layout.addWidget(context_scroll)
-        layout.addWidget(self._artifact_group(), 1)
+        layout.addWidget(self._selected_record_context())
         layout.addWidget(self._more_details_group())
+        layout.addStretch(1)
         return widget
 
     def _selected_record_context(self) -> QWidget:
@@ -698,16 +757,13 @@ class LogsPage(QWidget):
     def _review_actions_group(self) -> QWidget:
         widget = QWidget()
         widget.setObjectName("logsReviewActions")
-        layout = QHBoxLayout(widget)
+        layout = QVBoxLayout(widget)
         layout.setContentsMargins(*zero_margins())
-        layout.setSpacing(theme_spacing().control_gap)
+        layout.setSpacing(0)
 
-        self.open_input_button = set_button_role(QPushButton("Open Input Image"), "secondary")
-        set_button_icon(self.open_input_button, "open")
-        self.open_input_button.clicked.connect(self.open_selected_input_image)
-        self.open_annotated_button = set_button_role(QPushButton("Open Annotated Image"), "secondary")
-        set_button_icon(self.open_annotated_button, "open")
-        self.open_annotated_button.clicked.connect(self.open_selected_annotated_image)
+        self.view_images_button = set_button_role(QPushButton("View Log Images"), "primary")
+        set_button_icon(self.view_images_button, "image")
+        self.view_images_button.clicked.connect(self.open_selected_log_images)
         self.open_csv_button = set_button_role(QPushButton("Open CSV File"), "secondary")
         set_button_icon(self.open_csv_button, "open")
         self.open_csv_button.clicked.connect(self.open_csv_file)
@@ -715,14 +771,7 @@ class LogsPage(QWidget):
         set_button_icon(self.open_output_button, "open")
         self.open_output_button.clicked.connect(self.open_output_folder)
 
-        for button in (
-            self.open_input_button,
-            self.open_annotated_button,
-            self.open_csv_button,
-            self.open_output_button,
-        ):
-            layout.addWidget(button)
-        layout.addStretch(1)
+        layout.addWidget(ActionButtonGrid((self.view_images_button, self.open_csv_button, self.open_output_button), columns=2))
         self._set_review_actions_enabled(False)
         return widget
 
@@ -799,28 +848,6 @@ class LogsPage(QWidget):
 
     def _set_more_details_visible(self, visible: bool) -> None:
         self.more_details_scroll.setVisible(visible)
-
-    def _artifact_group(self) -> QGroupBox:
-        group = QGroupBox("Artifacts")
-        group.setObjectName("logsArtifactReview")
-        group.setMinimumHeight(theme_dimensions().logs_artifact_min_height)
-        group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        layout = QVBoxLayout(group)
-        layout.setContentsMargins(*group_content_margins())
-        layout.setSpacing(theme_spacing().logs_filter_gap)
-
-        self.result_image_tabs = ResultImageTabs(
-            annotated_placeholder="No annotated image selected.",
-            heatmap_placeholder="No heatmap selected.",
-            mask_placeholder="No presence mask selected.",
-        )
-        self.fit_image_button = self.result_image_tabs.fit_image_button
-        self.tabs = self.result_image_tabs.tabs
-        self.annotated_preview = self.result_image_tabs.annotated_preview
-        self.heatmap_preview = self.result_image_tabs.heatmap_preview
-        self.mask_preview = self.result_image_tabs.mask_preview
-        layout.addWidget(self.result_image_tabs, 1)
-        return group
 
     def refresh_from_state(self) -> None:
         if self.state.logs_root_dir is None:
@@ -1021,12 +1048,6 @@ class LogsPage(QWidget):
             error_widget.setPlainText(error)
         self._set_error_visible(bool(error))
 
-        self.result_image_tabs.set_artifacts(
-            annotated_path=row.get("annotated_image_path"),
-            heatmap_path=row.get("heatmap_path"),
-            presence_mask_path=row.get("presence_mask_path"),
-        )
-
     def _clear_details_and_previews(self) -> None:
         for widget in self._detail_widgets.values():
             if isinstance(widget, QPlainTextEdit):
@@ -1048,7 +1069,6 @@ class LogsPage(QWidget):
         self.more_details_button.setChecked(False)
         self._set_review_actions_enabled(False)
         self._set_error_visible(False)
-        self.result_image_tabs.clear()
 
     def _set_error_visible(self, visible: bool) -> None:
         if self._error_label is not None:
@@ -1057,14 +1077,7 @@ class LogsPage(QWidget):
             self._error_text.setVisible(visible)
 
     def _set_review_actions_enabled(self, has_selected_record: bool) -> None:
-        self.open_input_button.setEnabled(has_selected_record)
-        self.open_annotated_button.setEnabled(has_selected_record)
-
-    def _fit_active_preview(self) -> None:
-        self.result_image_tabs.fit_active_preview()
-
-    def _refit_active_preview_if_needed(self) -> None:
-        self.result_image_tabs.refit_active_preview_if_needed()
+        self.view_images_button.setEnabled(has_selected_record)
 
     def open_csv_file(self) -> None:
         self._open_path(self._current_csv_path, "No CSV log is loaded.")
@@ -1073,15 +1086,17 @@ class LogsPage(QWidget):
         path_text = self.output_folder_edit.text().strip()
         self._open_path(Path(path_text) if path_text else None, "No output folder is selected.")
 
-    def open_selected_input_image(self) -> None:
+    def open_selected_log_images(self) -> None:
         row = self._current_row()
-        path = row.get("image_path") if row else ""
-        self._open_path(Path(path) if path else None, "Selected row has no input image path.")
-
-    def open_selected_annotated_image(self) -> None:
-        row = self._current_row()
-        path = row.get("annotated_image_path") if row else ""
-        self._open_path(Path(path) if path else None, "Selected row has no annotated image path.")
+        if row is None:
+            self._set_feedback("Select a log record before viewing its images.", ok=False, area="review")
+            return
+        if self._log_image_dialog is None:
+            self._log_image_dialog = LogImageDialog(self)
+        self._log_image_dialog.set_record(row)
+        self._log_image_dialog.show()
+        self._log_image_dialog.raise_()
+        self._log_image_dialog.activateWindow()
 
     def _current_row(self) -> dict[str, str] | None:
         proxy_index = self.records_table.currentIndex()

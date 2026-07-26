@@ -39,7 +39,7 @@ from anomaly_inspection.desktop.ui.formatting import (
     format_threshold,
 )
 from anomaly_inspection.desktop.ui.icons import app_logo_path, app_window_icon, qtawesome_available, state_icon
-from anomaly_inspection.desktop.ui.layout_contracts import ActionSection, ControlRail, ElidedValueLabel, WorkbenchLayout
+from anomaly_inspection.desktop.ui.layout_contracts import ActionButtonGrid, ActionSection, ControlRail, ElidedValueLabel, WorkbenchLayout
 from anomaly_inspection.desktop.pages.inspect_camera import (
     InspectCameraPage,
     captured_image_path,
@@ -641,28 +641,28 @@ def test_workbench_layout_uses_non_collapsible_bounded_rail_and_expanding_worksp
     assert workspace.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
 
 
-def test_main_window_wraps_pages_in_scrollable_content_host():
+def test_main_window_keeps_pages_in_fixed_content_hosts():
     app = QApplication.instance() or QApplication([])
     window = MainWindow(AppState())
 
     first_page_host = window._stack.widget(0)
 
-    assert isinstance(first_page_host, QScrollArea)
-    assert first_page_host.widgetResizable() is True
+    assert first_page_host is window._project_setup_page
+    assert not isinstance(first_page_host, QScrollArea)
 
 
-def test_main_window_uses_workbench_host_for_inspect_image_only():
+def test_main_window_keeps_every_workflow_page_in_a_fixed_host():
     app = QApplication.instance() or QApplication([])
     window = MainWindow(AppState())
 
-    assert isinstance(window._stack.widget(0), QScrollArea)
-    assert isinstance(window._stack.widget(1), QScrollArea)
-    assert isinstance(window._stack.widget(2), QScrollArea)
+    assert window._stack.widget(0) is window._project_setup_page
+    assert window._stack.widget(1) is window._reference_capture_page
+    assert window._stack.widget(2) is window._zone_editor_page
     assert window._stack.widget(3) is window._inspect_image_page
     assert not isinstance(window._stack.widget(3), QScrollArea)
     assert window._stack.widget(4) is window._inspect_camera_page
     assert not isinstance(window._stack.widget(4), QScrollArea)
-    assert isinstance(window._stack.widget(5), QScrollArea)
+    assert window._stack.widget(5) is window._logs_page
 
 
 
@@ -1818,7 +1818,7 @@ def test_reference_capture_page_uses_compact_controls_and_workspace():
     panels = page.findChildren(SectionPanel)
 
     assert page.findChild(QSplitter, "referenceCaptureWorkspace") is not None
-    assert page.findChild(QScrollArea, "referenceCaptureControlPaneScroll") is not None
+    assert page.findChild(QScrollArea, "referenceCaptureControlPaneScroll") is None
     assert page.findChild(QWidget, "referenceCaptureControlPane") is not None
     assert any(panel.property("density") == "compact" for panel in panels)
     assert isinstance(page.feedback_label, StatusBanner)
@@ -1828,6 +1828,7 @@ def test_reference_capture_page_uses_compact_controls_and_workspace():
     assert "Idle:" in page.capture_state_banner.text()
     assert page.capture_state_banner.property("state") == "idle"
     assert page.start_button.text() == "Start Camera"
+    assert page.findChild(ActionButtonGrid, "actionButtonGrid") is not None
     assert page.capture_button.text() == "Capture Background"
     assert page.start_button.property("buttonRole") == "primary"
     assert page.output_path_edit.text() == str(job_reference_image_path("default_job"))
@@ -2013,7 +2014,7 @@ def test_zone_editor_page_uses_compact_source_panel_and_canvas():
     panels = page.findChildren(SectionPanel)
 
     assert page.findChild(QSplitter, "zoneEditorWorkspace") is not None
-    assert page.findChild(QScrollArea, "zoneEditorControlPaneScroll") is not None
+    assert page.findChild(QScrollArea, "zoneEditorControlPaneScroll") is None
     assert page.findChild(QWidget, "zoneEditorControlPane") is not None
     assert any(panel.property("density") == "compact" for panel in panels)
     assert isinstance(page.feedback_label, StatusBanner)
@@ -2023,6 +2024,7 @@ def test_zone_editor_page_uses_compact_source_panel_and_canvas():
     assert page.zone_state_banner.property("state") == "blocked"
     buttons = {button.text() for button in page.findChildren(QPushButton)}
     assert {"Load Reference Image", "Fit Image", "Save Zones"}.issubset(buttons)
+    assert page.findChild(ActionButtonGrid, "actionButtonGrid") is not None
     assert page._zone_canvas_style == compute_zone_canvas_style(0, 0)
     assert page.zones_path_edit.text() == str(job_zones_path("default_job"))
 
@@ -2306,7 +2308,7 @@ def test_inspect_image_page_summary_widgets_exist():
     assert page.inputs_panel.property("styleVariant") == "classic"
     assert page.inputs_panel.findChild(QLabel).text() == "Input Image"
     assert isinstance(page.workspace, WorkbenchLayout)
-    assert page.findChild(QScrollArea, "inspectImageLeftPaneScroll") is not None
+    assert page.findChild(QScrollArea, "inspectImageLeftPaneScroll") is None
     assert page.findChild(QWidget, "inspectImageLeftPane") is not None
     assert page.findChild(QWidget, "inspectImageSecondaryPane") is not None
     assert isinstance(page.summary_panel, ResultSummaryPanel)
@@ -2329,8 +2331,8 @@ def test_inspect_image_page_summary_widgets_exist():
     assert page.annotated_preview.minimumHeight() == dimensions.inspect_result_preview_min_height
     assert has_ancestor(page.run_button, QScrollArea) is False
     assert has_ancestor(page.operation_state_banner, QScrollArea) is False
-    assert has_ancestor(page.summary_panel, QScrollArea, "inspectImageLeftPaneScroll") is True
-    assert has_ancestor(page.config_path_edit, QScrollArea, "inspectImageLeftPaneScroll") is True
+    assert has_ancestor(page.summary_panel, QScrollArea) is False
+    assert has_ancestor(page.config_path_edit, QScrollArea) is False
     assert page.findChild(QWidget, "inspectImageLeftPane").maximumWidth() == dimensions.workflow_rail_size_hint_width
     assert page.workspace.widget(1).sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
 
@@ -2393,7 +2395,7 @@ def test_inspect_image_result_completion_keeps_stable_workspace(tmp_path):
 
     assert page.layout().indexOf(page.workspace) == workspace_index
     assert page.workspace.widget(0) is page.findChild(QWidget, "inspectImageLeftPane")
-    assert page.findChild(QScrollArea, "inspectImageLeftPaneScroll").widget() is page.findChild(QWidget, "inspectImageSecondaryPane")
+    assert page.findChild(QWidget, "inspectImageSecondaryPane").parentWidget() is page.findChild(QWidget, "inspectImageLeftPane")
     assert page.workspace.widget(1).findChild(ResultImageTabs) is page.result_image_tabs
     assert page.summary_panel.result_badge.text() == "OK"
 
@@ -2498,7 +2500,7 @@ def test_inspect_image_result_images_section_has_useful_natural_height():
     assert page.annotated_preview.minimumHeight() == dimensions.inspect_result_preview_min_height
     assert page.tabs.minimumHeight() < dimensions.result_tabs_min_height
     assert page.annotated_preview.minimumHeight() < dimensions.preview_min_height
-    assert page.workspace.minimumSizeHint().height() <= 480
+    assert page.workspace.minimumSizeHint().height() <= 560
 
 
 def test_inspect_image_workspace_size_hint_stays_stable_after_artifact_images_load(tmp_path):
@@ -2596,7 +2598,7 @@ def test_inspect_camera_page_uses_shared_ui_components():
     assert {"Camera", "Operation", "Result Summary", "Config and Output"}.issubset(section_titles)
     assert any(panel.property("density") == "compact" for panel in panels)
     assert isinstance(page.findChild(QSplitter, "cameraOperatorWorkspace"), WorkbenchLayout)
-    assert page.findChild(QScrollArea, "cameraControlPaneScroll") is not None
+    assert page.findChild(QScrollArea, "cameraControlPaneScroll") is None
     assert page.findChild(QWidget, "cameraControlPane") is not None
     assert page.findChild(QWidget, "cameraSecondaryPane") is not None
     assert isinstance(page.visual_stack, QStackedWidget)
@@ -2614,13 +2616,14 @@ def test_inspect_camera_page_uses_shared_ui_components():
     assert page.tabs.minimumHeight() == dimensions.camera_result_tabs_min_height
     assert page.annotated_preview.minimumHeight() == dimensions.camera_result_preview_min_height
     assert page.findChild(QWidget, "cameraControlPane").maximumWidth() == dimensions.workflow_rail_size_hint_width
+    assert page.findChild(ActionButtonGrid, "actionButtonGrid") is not None
     assert has_ancestor(page.start_button, QScrollArea) is False
     assert has_ancestor(page.stop_button, QScrollArea) is False
     assert has_ancestor(page.capture_button, QScrollArea) is False
     assert has_ancestor(page.inspect_button, QScrollArea) is False
     assert has_ancestor(page.operation_state_banner, QScrollArea) is False
-    assert has_ancestor(page.summary_panel, QScrollArea, "cameraControlPaneScroll") is True
-    assert has_ancestor(page.config_path_edit, QScrollArea, "cameraControlPaneScroll") is True
+    assert has_ancestor(page.summary_panel, QScrollArea) is False
+    assert has_ancestor(page.config_path_edit, QScrollArea) is False
     assert page.findChild(QSplitter, "cameraOperatorWorkspace").widget(1).sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
 
 
@@ -3451,33 +3454,31 @@ def test_logs_page_constructs_with_expected_controls():
     assert page.findChild(QGroupBox, "logsSourceControls") is not None
     assert page.findChild(QGroupBox, "logsFilterControls") is not None
     assert page.findChild(QWidget, "selectedRecordReview") is not None
-    assert page.findChild(QScrollArea, "logsSelectedRecordScroll") is not None
+    assert page.findChild(QScrollArea, "logsSelectedRecordScroll") is None
     assert page.findChild(QWidget, "logsSelectedRecordContext") is not None
-    assert page.findChild(QGroupBox, "logsArtifactReview") is not None
+    assert page.findChild(QGroupBox, "logsArtifactReview") is None
     assert page.findChild(QWidget, "logsMoreDetails") is not None
     assert page.findChild(QWidget, "logsSelectedRecordSummary") is not None
     assert page.findChild(QWidget, "logsReviewActions") is not None
     assert isinstance(page.feedback_label, StatusBanner)
     assert isinstance(page.review_feedback_label, StatusBanner)
-    assert isinstance(page.result_image_tabs, ResultImageTabs)
     assert isinstance(page.records_table, QTableView)
     assert page.result_filter_combo.count() == 5
     assert page.mode_filter_combo.count() == 4
     assert page.load_job_history_button.text() == "Load Job History"
-    assert page.tabs.count() == 3
+    assert page.view_images_button.text() == "View Log Images"
     assert normalized_path_text(page.output_folder_edit.text()) == "outputs/current"
     assert page.source_summary_label.text() == "No logs loaded."
     assert page.empty_review_label.isHidden() is False
     assert page.selected_record_widget.isHidden() is True
     assert page.summary_grid_widget.isHidden() is True
     assert page.more_details_widget.isHidden() is True
-    assert page.open_input_button.isEnabled() is False
-    assert page.open_annotated_button.isEnabled() is False
+    assert page.view_images_button.isEnabled() is False
     assert dimensions.logs_splitter_records_width > dimensions.logs_splitter_review_width
     assert dimensions.logs_splitter_records_stretch > dimensions.logs_splitter_review_stretch
-    assert dimensions.logs_splitter_review_width >= 620
-    assert dimensions.logs_splitter_records_stretch == 6
-    assert dimensions.logs_splitter_review_stretch == 4
+    assert dimensions.logs_splitter_review_width >= 480
+    assert dimensions.logs_splitter_records_stretch == 7
+    assert dimensions.logs_splitter_review_stretch == 3
 
 
 def test_logs_records_table_uses_balanced_column_resize_modes():
@@ -3507,7 +3508,6 @@ def test_logs_records_table_uses_theme_styles():
     assert "QWidget#logsSelectedRecordSummary" in stylesheet
     assert "QWidget#logsRecordsPane" in stylesheet
     assert "QWidget#logsReviewPane" in stylesheet
-    assert "QScrollArea#logsSelectedRecordScroll" in stylesheet
     assert "QWidget#logsReviewActions" in stylesheet
     assert "QWidget#logsReviewToolbar" in stylesheet
     assert "QFrame#topNavShell[compact=\"true\"]" in stylesheet
@@ -3565,17 +3565,14 @@ def test_logs_page_updates_details_and_hides_empty_error(tmp_path):
     assert page._detail_widgets[LOG_SOURCE_KEY].toPlainText() == str(source)
     assert page._error_label.isHidden() is True
     assert page._error_text.isHidden() is True
-    assert page.open_input_button.isEnabled() is True
-    assert page.open_annotated_button.isEnabled() is True
+    assert page.view_images_button.isEnabled() is True
 
 
-def test_logs_artifact_viewer_size_hint_stays_stable_after_artifact_images_load(tmp_path):
+def test_logs_image_viewer_is_created_only_when_requested(tmp_path):
     app = QApplication.instance() or QApplication([])
     image_path = tmp_path / "large_log_artifact.png"
     cv2.imwrite(str(image_path), np.zeros((1600, 2400, 3), dtype=np.uint8))
     page = LogsPage(AppState())
-    before_tabs = page.result_image_tabs.sizeHint()
-    before_preview = page.annotated_preview.sizeHint()
     row = rows_with_log_metadata(
         [
             {
@@ -3591,11 +3588,16 @@ def test_logs_artifact_viewer_size_hint_stays_stable_after_artifact_images_load(
         "Camera",
     )[0]
 
-    page._update_selected_record(row)
+    page._rows = [row]
+    page._set_model_rows()
+    assert page._log_image_dialog is None
+    page.open_selected_log_images()
     app.processEvents()
 
-    assert page.result_image_tabs.sizeHint() == before_tabs
-    assert page.annotated_preview.sizeHint() == before_preview
+    assert page._log_image_dialog is not None
+    assert page._log_image_dialog.tabs.count() == 4
+    assert page._log_image_dialog.annotated_preview._pixmap_item is not None
+    page._log_image_dialog.close()
 
 
 def test_logs_more_details_default_collapsed_and_expands_after_selection(tmp_path):
@@ -3613,19 +3615,14 @@ def test_logs_more_details_default_collapsed_and_expands_after_selection(tmp_pat
     assert page.more_details_scroll.isHidden() is False
 
 
-def test_logs_artifact_review_stays_stable_when_more_details_expand(tmp_path):
+def test_logs_details_remain_in_the_compact_review_pane(tmp_path):
     app = QApplication.instance() or QApplication([])
     page = LogsPage(AppState())
     row = rows_with_log_metadata([synthetic_log_rows(tmp_path)[1]], tmp_path / "folder" / "run_1" / "summary.csv", "Folder")[0]
-    artifact_group = page.findChild(QGroupBox, "logsArtifactReview")
-    before_artifact = artifact_group.sizeHint()
-
     page._update_selected_record(row)
     page.more_details_button.setChecked(True)
     app.processEvents()
 
-    assert artifact_group.sizeHint() == before_artifact
-    assert page.findChild(QScrollArea, "logsSelectedRecordScroll").maximumHeight() == theme_dimensions().logs_selected_record_context_max_height
     assert page.more_details_widget.parent().objectName() == "selectedRecordReview"
 
 
@@ -3641,8 +3638,7 @@ def test_logs_empty_state_replaces_blank_detail_grid():
     assert page.summary_grid_widget.isHidden() is True
     assert page.more_details_widget.isHidden() is True
     assert page.record_result_badge.text() == "No result"
-    assert page.open_input_button.isEnabled() is False
-    assert page.open_annotated_button.isEnabled() is False
+    assert page.view_images_button.isEnabled() is False
 
 
 def test_logs_page_shows_error_when_present(tmp_path):

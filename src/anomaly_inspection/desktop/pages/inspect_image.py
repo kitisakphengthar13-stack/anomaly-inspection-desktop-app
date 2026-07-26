@@ -184,7 +184,7 @@ class InspectImagePage(QWidget):
         rail = ControlRail(object_name="inspectImageLeftPane")
         rail.add_fixed(self._inputs_group())
         rail.add_fixed(self._action_group())
-        rail.set_scroll_body(self._secondary_control_pane(), object_name="inspectImageLeftPaneScroll")
+        rail.add_fixed(self._secondary_control_pane())
         return rail
 
     def _secondary_control_pane(self) -> QWidget:

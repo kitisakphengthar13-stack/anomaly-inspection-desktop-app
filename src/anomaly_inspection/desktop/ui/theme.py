@@ -292,7 +292,7 @@ FACTORY_DARK = InspectionTheme(
         window_initial_width=1280,
         window_initial_height=800,
         window_min_width=960,
-        window_min_height=640,
+        window_min_height=800,
         radius=6,
         input_radius=4,
         scrollbar_size=12,
@@ -326,11 +326,11 @@ FACTORY_DARK = InspectionTheme(
         workflow_rail_size_hint_height=420,
         workflow_rail_min_width=430,
         workflow_rail_min_height=180,
-        logs_splitter_records_width=920,
-        logs_splitter_review_width=650,
-        logs_splitter_records_stretch=6,
-        logs_splitter_review_stretch=4,
-        logs_records_min_height=520,
+        logs_splitter_records_width=1120,
+        logs_splitter_review_width=500,
+        logs_splitter_records_stretch=7,
+        logs_splitter_review_stretch=3,
+        logs_records_min_height=450,
         logs_artifact_min_height=560,
         logs_selected_record_context_max_height=285,
         logs_details_scroll_max_height=190,
@@ -820,11 +820,6 @@ def build_app_stylesheet(theme: InspectionTheme | None = None) -> str:
     QWidget#logsReviewToolbar,
     QWidget#logsRecordsPane,
     QWidget#logsReviewPane,
-    QScrollArea#inspectImageLeftPaneScroll,
-    QScrollArea#cameraControlPaneScroll,
-    QScrollArea#referenceCaptureControlPaneScroll,
-    QScrollArea#zoneEditorControlPaneScroll,
-    QScrollArea#logsSelectedRecordScroll,
     QWidget#referenceCaptureControlPane,
     QWidget#zoneEditorControlPane,
     QWidget#cameraControlPane,
@@ -849,15 +844,6 @@ def build_app_stylesheet(theme: InspectionTheme | None = None) -> str:
     QScrollArea#selectedRecordDetailsScroll {{
         background: transparent;
         border: 0;
-    }}
-    QScrollArea#inspectImageLeftPaneScroll > QWidget > QWidget {{
-        background: transparent;
-    }}
-    QScrollArea#cameraControlPaneScroll > QWidget > QWidget,
-    QScrollArea#referenceCaptureControlPaneScroll > QWidget > QWidget,
-    QScrollArea#zoneEditorControlPaneScroll > QWidget > QWidget,
-    QScrollArea#logsSelectedRecordScroll > QWidget > QWidget {{
-        background: transparent;
     }}
     QLabel#logsEmptyReview {{
         color: {p.text_secondary};

@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
-    QScrollArea,
     QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
@@ -45,7 +44,7 @@ from anomaly_inspection.desktop.pages.zone_editor import ZoneEditorPage
 class PageSpec:
     title: str
     description: str
-    scroll_policy: str = "page"
+    scroll_policy: str = "fixed"
 
 
 PAGE_SPECS: tuple[PageSpec, ...] = (
@@ -405,21 +404,6 @@ class MainWindow(QMainWindow):
             button.setText(self.COMPACT_NAV_LABELS[index] if compact else PAGE_SPECS[index].title)
 
 
-def _scrollable_page(page: QWidget) -> QScrollArea:
-    page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-
-    scroll = QScrollArea()
-    scroll.setWidgetResizable(True)
-    scroll.setFrameShape(QFrame.Shape.NoFrame)
-    scroll.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-    scroll.setWidget(page)
-    return scroll
-
-
 def _page_host(page: QWidget, scroll_policy: str) -> QWidget:
-    if scroll_policy == "workbench":
-        page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        return page
-    return _scrollable_page(page)
+    page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+    return page

@@ -38,10 +38,9 @@ from anomaly_inspection.desktop.ui.theme import (
     zero_margins,
     zone_overlay_palette,
 )
-from anomaly_inspection.desktop.ui.layout_contracts import ActionSection
+from anomaly_inspection.desktop.ui.layout_contracts import ActionButtonGrid
 from anomaly_inspection.desktop.ui.components import (
     PathPickerRow,
-    ScrollablePane,
     SectionPanel,
     StatusBanner,
     set_button_icon,
@@ -212,16 +211,13 @@ class ZoneEditorPage(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setObjectName("zoneEditorWorkspace")
         splitter.setChildrenCollapsible(False)
-        splitter.addWidget(self._control_pane_scroll())
+        splitter.addWidget(self._control_pane())
         splitter.addWidget(self._canvas_group())
         dimensions = theme_dimensions()
         splitter.setSizes([dimensions.camera_splitter_left_width, dimensions.camera_splitter_right_width])
         splitter.setStretchFactor(0, dimensions.camera_splitter_left_stretch)
         splitter.setStretchFactor(1, dimensions.camera_splitter_right_stretch)
         return splitter
-
-    def _control_pane_scroll(self) -> ScrollablePane:
-        return ScrollablePane(self._control_pane(), object_name="zoneEditorControlPaneScroll")
 
     def _control_pane(self) -> QWidget:
         widget = QWidget()
@@ -290,10 +286,7 @@ class ZoneEditorPage(QWidget):
             button.clicked.connect(callback)
             set_button_role(button, "primary" if label == "Save Zones" else "secondary")
             buttons.append(button)
-        action_section = ActionSection(rows=2)
-        action_section.add_row(buttons[:3])
-        action_section.add_row(buttons[3:])
-        panel.content_layout.addWidget(action_section)
+        panel.content_layout.addWidget(ActionButtonGrid(buttons, columns=3))
         panel.content_layout.addWidget(self.feedback_label)
         return panel
 
